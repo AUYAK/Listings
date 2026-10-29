@@ -1,0 +1,17 @@
+{
+  "name": "kufar-monitor",
+  "version": "1.0.0",
+  "description": "Monitor Kufar.by listings across configured search links and send Telegram notifications",
+  "main": "listings.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node listings.js",
+    "test": "node test-market.js && node test-coins.js",
+    "coins": "node coins.js"
+  },
+  "dependencies": {
+    "dotenv": "^17.0.0",
+    "pg": "^8.22.0",
+    "playwright": "^1.59.0"
+  }
+}
