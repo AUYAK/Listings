@@ -173,14 +173,18 @@ check('наша оценка: та же группа и то же состоян
   assert.strictEqual(cm.marketEstimate(rows, parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро' })), null); // без состояния — нет оценки
   assert.strictEqual(cm.marketEstimate(rows, parseCoin({ title: 'Полтина 1898', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' })), null);
 });
-check('каталог главнее рынка, порог выгоды 30%', () => {
+check('ориентир — самый низкий из источников, порог выгоды 30%', () => {
   const p = parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
   const catalog = { source: 'numista', title: '1 Rouble - Nicholas II', prices: { F: 60, VF: 150, XF: 400 } };
-  const e = cm.assess({ parsed: p, price: 100, rows, catalog });
-  assert.strictEqual(e.referenceSource, 'catalog');
+  const e = cm.assess({ parsed: p, price: 100, rows: [], catalog }); // только каталог
+  assert.strictEqual(e.referenceSource, 'numista');
   assert.strictEqual(e.reference, 150);
   assert.strictEqual(e.deviationPct, -33);
   assert.strictEqual(e.isBargain, true);
+  const both = cm.assess({ parsed: p, price: 100, rows, catalog }); // каталог 150, наша медиана 120 → берём 120
+  assert.strictEqual(both.referenceSource, 'market');
+  assert.strictEqual(both.reference, 120);
+  assert.strictEqual(both.isBargain, false);
   const e2 = cm.assess({ parsed: p, price: 100, rows }); // без каталога — наша медиана 120
   assert.strictEqual(e2.referenceSource, 'market');
   assert.strictEqual(e2.deviationPct, -17);
@@ -196,20 +200,32 @@ check('каталог главнее рынка, порог выгоды 30%', (
 check('строки оценки в карточке', () => {
   const p = parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
   const lines = cm.formatEstimateLines(cm.assess({ parsed: p, price: 100, rows, catalog: { source: 'numista', prices: { VF: 150 } } }));
-  assert.deepStrictEqual(lines, ['📚 Numista (VF): 150 р.', '📊 Наша база (1 рубль 1898 АГ, VF): 120 р. по 3 лотам, продаж 1', '🟢 На 33% (50 р.) ниже Numista — выгодно']);
+  assert.deepStrictEqual(lines, ['📚 Numista (VF): 150 р.', '📊 Наша база (1 рубль 1898 АГ, VF): 120 р. по 3 лотам, продаж 1', '🟡 На 17% (20 р.) ниже нашей базы']);
   assert.deepStrictEqual(cm.formatEstimateLines(cm.assess({ parsed: p, price: 100, rows: [] })), ['📊 Наша база: похожих лотов в этом состоянии ещё не было', '⚪ Ориентира пока нет: ни каталога, ни трёх похожих лотов']);
-  // несколько источников — каждый своей строкой, вердикт по первому (gdenashel), редкость из справочника типа
-  const multi = cm.assess({ parsed: p, price: 100, rows, coinType: { konros: 'R1+', mintage: 1100002 },
+  // несколько источников — каждый своей строкой, вердикт по самому низкому (Numista 140), редкость из справочника типа
+  const multi = cm.assess({ parsed: p, price: 100, rows: [], coinType: { konros: 'R1+', mintage: 1100002 },
     catalogs: [{ source: 'gdenashel', prices: { VF: 150, XF: 400 }, samples: { VF: 42, XF: 17 }, windowYears: 3 }, { source: 'numista', prices: { VF: 140 } }] });
-  assert.strictEqual(multi.reference, 150);
+  assert.strictEqual(multi.reference, 140);
+  assert.strictEqual(multi.referenceSource, 'numista');
   assert.strictEqual(multi.catalogs.length, 2);
   assert.deepStrictEqual(cm.formatEstimateLines(multi), [
     '📚 gdenashel.ru, аукционы РФ (VF, 42 прох. за 3 г.): 150 р.',
     '📚 Numista (VF): 140 р.',
-    '📊 Наша база (1 рубль 1898 АГ, VF): 120 р. по 3 лотам, продаж 1',
+    '📊 Наша база: похожих лотов в этом состоянии ещё не было',
     '💎 Редкость: эпическая 🟣 · Конрос R1+ · тираж 1 100 002 · 59 прох. за 3 г.',
-    '🟢 На 33% (50 р.) ниже gdenashel.ru — выгодно',
+    '🟡 На 29% (40 р.) ниже Numista', // 29% < 30% и 40 р. < 50 р. — ещё не выгода
   ]);
+  // слабы MS64+ из архива РФ: не ориентир для UNC-лота, только строка для справки; ориентир — наша база
+  const unc = parseCoin({ title: '15 копеек 1908', sectionPath: 'Серебро', conditionText: 'I (Новое, Unc)' });
+  const uncRows = [row('15 копеек 1908', 'UNC', 100), row('15 копеек 1908', 'UNC', 110), row('15 копеек 1908', 'UNC', 90)];
+  const slab = cm.assess({ parsed: unc, price: 9, rows: uncRows,
+    catalogs: [{ source: 'gdenashel', prices: { 'MS64+': 458, XF: 40 }, samples: { 'MS64+': 4, XF: 6 }, windowYears: 3 }] });
+  assert.strictEqual(slab.catalog.grade, 'XF'); // ближайшее состояние ниже UNC, MS64+ не в шкале
+  assert.strictEqual(slab.reference, 40);
+  assert.strictEqual(slab.referenceSource, 'gdenashel');
+  const slabLines = cm.formatEstimateLines(slab);
+  assert.ok(slabLines.includes('🏛 gdenashel.ru, слабы MS64+, 4 прох. за 3 г.: 458 р. — для справки, не ориентир'), slabLines.join('\n'));
+  assert.ok(slabLines.at(-1).startsWith('🟢 На 77% (31 р.) ниже gdenashel.ru'), slabLines.at(-1));
 });
 check('редкость: шкала Конроса, иначе частота проходов', () => {
   assert.strictEqual(cm.rarityTier({}).name, 'обычная');
@@ -239,7 +255,11 @@ check('выгода: 50 р. с дорогого лота достаточно, 3
 console.log('архив проходов gdenashel.ru:');
 const gd = require('./coins/gdenashel');
 check('состояния источника → наша шкала', () => {
-  assert.strictEqual(gd.normalizeGrade('MS64'), 'UNC');
+  assert.strictEqual(gd.normalizeGrade('MS64'), 'MS64+'); // слабы от MS64 — отдельно от «просто UNC»
+  assert.strictEqual(gd.normalizeGrade('MS67'), 'MS64+');
+  assert.strictEqual(gd.normalizeGrade('MS63'), 'UNC');
+  assert.strictEqual(gd.normalizeGrade('MS 65'), 'MS64+');
+  assert.strictEqual(gd.normalizeGrade('UNC'), 'UNC');
   assert.strictEqual(gd.normalizeGrade('AU58'), 'AU');
   assert.strictEqual(gd.normalizeGrade('XF'), 'XF');
   assert.strictEqual(gd.normalizeGrade('VF25'), 'VF');
@@ -296,7 +316,7 @@ check('страница проходов: дата, дом, состояние, 
   assert.strictEqual(r.sales.length, 2);
   assert.deepStrictEqual(r.sales[0], { saleId: '11111111-1111-1111-1111-111111111111', title: '1 рубль 1895 года', soldOn: '2025-01-29', house: 'Конрос Аукцион 1 Лот №22', gradeRaw: 'VF', grade: 'VF', slab: null, priceRub: 16500, photos: ['https://gdenashel.ru/storage/resized/200x/sale/a/11111111-1111-1111-1111-111111111111-1.jpg', 'https://gdenashel.ru/storage/resized/200x/sale/a/11111111-1111-1111-1111-111111111111-2.jpg'] });
   assert.strictEqual(r.sales[1].priceRub, null);
-  assert.strictEqual(r.sales[1].grade, 'UNC');
+  assert.strictEqual(r.sales[1].grade, 'MS64+');
   assert.strictEqual(r.sales[1].slab, 'ННР');
 });
 

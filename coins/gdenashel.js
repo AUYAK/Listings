@@ -56,6 +56,9 @@ function normalizeGrade(raw) {
   const g = (raw || '').toUpperCase().replace(/\s+/g, '');
   if (!g) return null;
   if (/^(PROOF|PF|PR)/.test(g)) return 'PF';
+  // Слабы MS64 и выше — отборные экземпляры, их цена в разы выше «просто UNC» с ay.by; держим отдельно,
+  // как ориентир для обычных лотов не используются (см. coins/market.js)
+  if (/^MS(6[4-9]|70)/.test(g)) return 'MS64+';
   if (/^(UNC|MS|BU)/.test(g)) return 'UNC';
   if (/^AU/.test(g)) return 'AU';
   if (/^(XF|EF)/.test(g)) return 'XF';

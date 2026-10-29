@@ -112,15 +112,22 @@ function assess({ parsed, price, rows = [], excludeId = null, catalog = null, ca
     return cp ? { ...cp, source: c.source, title: c.title, samples: c.samples ? c.samples[cp.grade] : null, passes: sumSamples(c.samples), windowYears: c.windowYears || null, factor: c.factor } : null;
   }).filter(Boolean);
   const cat = cats[0] || null;
-  const reference = cat ? cat.price : market ? market.refMedian : null;
-  const referenceSource = cat ? 'catalog' : market ? 'market' : null;
+  // Ориентир — самый низкий из источников: архив РФ за слабы даёт в разы больше, чем стоит сырая монета у нас,
+  // и «выгодно» по завышенному ориентиру ничего не стоит
+  const candidates = [...cats.map((c) => ({ price: c.price, source: c.source })), ...(market ? [{ price: market.refMedian, source: 'market' }] : [])]
+    .filter((c) => c.price > 0).sort((a, b) => a.price - b.price);
+  const reference = candidates.length ? candidates[0].price : null;
+  const referenceSource = candidates.length ? candidates[0].source : null;
+  // Слабы MS64+ по тому же типу — только для справки при UNC/AU-лотах
+  const slabbedSrc = ['UNC', 'AU'].includes(parsed.grade) ? list.find((c) => c.prices && c.prices['MS64+'] != null) : null;
+  const slabbed = slabbedSrc ? { source: slabbedSrc.source, price: slabbedSrc.prices['MS64+'], samples: slabbedSrc.samples ? slabbedSrc.samples['MS64+'] : null, windowYears: slabbedSrc.windowYears || null } : null;
   const hasPrice = price != null && price >= MIN_PRICE;
   const deviationPct = reference && hasPrice ? Math.round(((price - reference) / reference) * 100) : null;
   const gainByn = reference && hasPrice ? Math.round(reference - price) : null;
   const gd = list.find((c) => c.source === 'gdenashel');
   const rarity = coinType || gd ? rarityTier({ konros: coinType && coinType.konros, mintage: coinType && coinType.mintage, passes: gd ? sumSamples(gd.samples) : null, windowYears: gd ? gd.windowYears : null }) : null;
   return {
-    market, catalog: cat, catalogs: cats, rarity,
+    market, catalog: cat, catalogs: cats, slabbed, rarity,
     reference, referenceSource, deviationPct, gainByn,
     isBargain: isBargain({ price, reference, bargainPct, bargainByn, minByn }),
     bargainPct, bargainByn, minByn,
@@ -131,7 +138,7 @@ const fmt = (n) => `${num(n)} р.`;
 const SOURCE_NAMES = { gdenashel: 'gdenashel.ru, аукционы РФ', numista: 'Numista' };
 const srcName = (s) => SOURCE_NAMES[s] || s;
 
-// Строки карточки: каждый источник отдельно, чтобы не смешивать; вердикт — по первому доступному
+// Строки карточки: каждый источник отдельно, чтобы не смешивать; вердикт — по самому низкому ориентиру
 function formatEstimateLines(est) {
   if (!est) return [];
   const lines = [];
@@ -140,11 +147,15 @@ function formatEstimateLines(est) {
     const k = c.factor && c.factor !== 1 ? `, ×${c.factor}` : '';
     lines.push(`📚 ${srcName(c.source)} (${c.grade}${c.exact ? '' : ', ближайшее состояние'}${n}${k}): ${fmt(c.price)}`);
   }
+  if (est.slabbed) {
+    const n = est.slabbed.samples ? `, ${est.slabbed.samples} прох.${est.slabbed.windowYears ? ` за ${est.slabbed.windowYears} г.` : ''}` : '';
+    lines.push(`🏛 ${srcName(est.slabbed.source).split(',')[0]}, слабы MS64+${n}: ${fmt(est.slabbed.price)} — для справки, не ориентир`);
+  }
   if (est.market) lines.push(`📊 Наша база (${est.market.label}, ${est.market.grade}): ${fmt(est.market.refMedian)} по ${est.market.refSource === 'sold' ? `${est.market.soldN} продажам` : `${est.market.n} лотам`}${est.market.refSource !== 'sold' && est.market.soldN ? `, продаж ${est.market.soldN}` : ''}`);
   else lines.push('📊 Наша база: похожих лотов в этом состоянии ещё не было');
   if (est.rarity) lines.push(`💎 Редкость: ${est.rarity.name} ${est.rarity.emoji}${est.rarity.reason ? ` · ${est.rarity.reason}` : ''}`);
   if (est.deviationPct != null) {
-    const base = est.referenceSource === 'catalog' ? srcName(est.catalog.source).split(',')[0] : 'нашей базы';
+    const base = est.referenceSource === 'market' ? 'нашей базы' : srcName(est.referenceSource).split(',')[0];
     if (est.isBargain) lines.push(`🟢 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base} — выгодно`);
     else if (est.deviationPct < 0) lines.push(`🟡 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base}`);
     else lines.push(`🔴 На ${est.deviationPct}% выше ${base}`);

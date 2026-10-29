@@ -244,6 +244,12 @@ async function upsertSales(rows) {
 // Пересчёт каталога из проходов: медиана цены по (ключ, состояние) за последние years лет, в BYN по курсу rate.
 // Ключи: и точный вариант (с буквами), и тип целиком. Возвращает число записей каталога.
 async function rebuildCatalogFromSales(source, years, rate, minSamples = 2) {
+  // Проходы, сохранённые до разделения слабов: MS64 и выше — отдельное состояние (см. gdenashel.normalizeGrade)
+  await pool.query(
+    `UPDATE listings.coin_sales SET grade = 'MS64+'
+     WHERE source = $1 AND grade = 'UNC' AND upper(regexp_replace(grade_raw, '\\s', '', 'g')) ~ '^MS(6[4-9]|70)'`,
+    [source]
+  );
   const agg = await pool.query(
     `WITH recent AS (
        SELECT type_key, variant_key, grade, price, title FROM listings.coin_sales
