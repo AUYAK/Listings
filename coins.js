@@ -23,8 +23,9 @@ const FINALIZE_BATCH = 30;    // истёкших лотов за цикл
 const FINALIZE_GRACE_MIN = 10;
 const AUCTION_NOTIFY_HOURS = parseFloat(process.env.COINS_AUCTION_NOTIFY_HOURS || '12'); // чистые аукционы — только под конец
 const CLOSING_BATCH = 30;
-// Страница лота после окончания торгов отдаёт 404 (проверено на 102 лотах), поэтому последнюю ставку и фото
-// снимаем за PRECLOSE_MIN минут до конца; итог по 404 = последняя увиденная ставка (final_approx).
+// Страница лота после торгов обычно жива («Завершён… Лот продан за …»), но защита ay.by иногда отдаёт 403/404,
+// поэтому последнюю ставку и фото снимаем за PRECLOSE_MIN минут до конца; если страница всё же пропала,
+// итог = последняя увиденная ставка (final_approx).
 const PRECLOSE_MIN = parseInt(process.env.COINS_PRECLOSE_MIN || '40', 10);
 const PRECLOSE_STALE_MIN = 15;
 const PRECLOSE_BATCH = 40;
