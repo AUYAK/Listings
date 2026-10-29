@@ -1,7 +1,6 @@
 require('dotenv').config();
 const store = require('./store');
 const { MONITORS } = require('./config');
-const stats = require('./stats');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const LIKE_EMOJI = '👍';
@@ -74,25 +73,6 @@ async function handleMessage(msg) {
   if (/^\/(start|settings)(@\w+)?(\s|$)/.test(text)) {
     console.log(`[Settings] ${text.split(' ')[0]} from chat=${chatId}`);
     await sendSettings(chatId);
-  } else if (/^\/stats(@\w+)?(\s|$)/.test(text)) {
-    console.log(`[Stats] /stats from chat=${chatId}`);
-    await sendStats(chatId);
-  }
-}
-
-// Market summary for the first monitor with market=true; period buttons switch the view in place
-async function sendStats(chatId) {
-  const monitor = MONITORS.find((m) => m.market);
-  if (!monitor) {
-    await tg('sendMessage', { chat_id: chatId, text: 'Статистика пока не ведётся ни по одной категории.' });
-    return;
-  }
-  try {
-    const { text, keyboard } = await stats.buildStats(monitor, stats.PERIODS[0].days);
-    await tg('sendMessage', { chat_id: chatId, text, parse_mode: 'HTML', reply_markup: keyboard });
-  } catch (err) {
-    console.error('[Stats] failed:', err.message);
-    await tg('sendMessage', { chat_id: chatId, text: 'Не удалось посчитать статистику, попробуйте позже.' });
   }
 }
 
@@ -100,25 +80,6 @@ async function handleCallback(cb) {
   const data = cb.data || '';
   const chatId = String(cb.message?.chat?.id ?? cb.from.id);
   const msgId = cb.message?.message_id;
-
-  if (data.startsWith('stats:')) {
-    const [, key, daysStr] = data.split(':');
-    const monitor = MONITORS.find((m) => m.key === key && m.market);
-    if (!monitor) {
-      await tg('answerCallbackQuery', { callback_query_id: cb.id, text: 'Категория больше не отслеживается' });
-      return;
-    }
-    const days = parseInt(daysStr, 10) || 0;
-    try {
-      const { text, keyboard } = await stats.buildStats(monitor, days);
-      if (msgId) await tg('editMessageText', { chat_id: chatId, message_id: msgId, text, parse_mode: 'HTML', reply_markup: keyboard });
-      await tg('answerCallbackQuery', { callback_query_id: cb.id });
-    } catch (err) {
-      console.error('[Stats] failed:', err.message);
-      await tg('answerCallbackQuery', { callback_query_id: cb.id, text: 'Не удалось посчитать статистику' });
-    }
-    return;
-  }
 
   if (data.startsWith('sub:')) {
     const key = data.slice(4);
@@ -180,7 +141,6 @@ async function main() {
   await tg('setMyCommands', {
     commands: [
       { command: 'settings', description: 'Выбрать категории уведомлений' },
-      { command: 'stats', description: 'Статистика рынка: что ушло, цены, тренд' },
     ],
   });
 

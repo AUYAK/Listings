@@ -219,113 +219,7 @@ async function getSubscribers(monitorKey) {
   return res.rows.map((r) => r.telegram_chat_id);
 }
 
-// ---- Market stats & sold tracking ----
-
-// All listings of a monitor with their latest price and parsed details (for median calculations)
-async function getMarketRows(monitorKey) {
-  const withDetails = `SELECT l.id, l.status, l.first_seen, l.last_seen, g.gone_at,
-            COALESCE(s.title, l.title) AS title, s.price_byn,
-            d.condition, d.chip, d.ram_gb, d.ssd_gb, d.screen_in, d.year
-     FROM listings.listings l
-     LEFT JOIN LATERAL (
-       SELECT title, price_byn FROM listings.listing_snapshots
-       WHERE listing_id = l.id ORDER BY scraped_at DESC LIMIT 1
-     ) s ON true
-     LEFT JOIN LATERAL (
-       SELECT min(checked_at) AS gone_at FROM listings.listing_status_logs
-       WHERE listing_id = l.id AND status = 'inactive'
-     ) g ON true
-     LEFT JOIN listings.listing_details d ON d.listing_id = l.id
-     WHERE l.monitor_key = $1`;
-  try {
-    return (await pool.query(withDetails, [monitorKey])).rows;
-  } catch (err) {
-    if (err.code === '42703') { // undefined_column → migration 010 not applied yet
-      return (await pool.query(withDetails.replace(', d.year', ', NULL AS year'), [monitorKey])).rows;
-    }
-    if (err.code !== '42P01') throw err; // undefined_table → migration 007 not applied yet
-    const withoutDetails = withDetails
-      .replace('d.condition, d.chip, d.ram_gb, d.ssd_gb, d.screen_in, d.year',
-        'NULL AS condition, NULL AS chip, NULL AS ram_gb, NULL AS ssd_gb, NULL AS screen_in, NULL AS year')
-      .replace('LEFT JOIN listings.listing_details d ON d.listing_id = l.id', '');
-    return (await pool.query(withoutDetails, [monitorKey])).rows;
-  }
-}
-
-// ---- Listing details (characteristics + description) ----
-
-async function saveListingDetails(listingId, d) {
-  const base = [listingId, JSON.stringify(d.specs || {}), d.description || null, d.condition || null, d.cpu || null,
-    d.chip || null, d.ramGb ?? null, d.ssdGb ?? null, d.screenIn ?? null, d.batteryCycles ?? null];
-  try {
-    await pool.query(
-      `INSERT INTO listings.listing_details
-         (listing_id, specs, description, condition, cpu, chip, ram_gb, ssd_gb, screen_in, battery_cycles,
-          year, battery_health_pct, body_condition, flags, fetched_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
-       ON CONFLICT (listing_id) DO UPDATE SET
-         specs = EXCLUDED.specs, description = EXCLUDED.description, condition = EXCLUDED.condition,
-         cpu = EXCLUDED.cpu, chip = EXCLUDED.chip, ram_gb = EXCLUDED.ram_gb, ssd_gb = EXCLUDED.ssd_gb,
-         screen_in = EXCLUDED.screen_in, battery_cycles = EXCLUDED.battery_cycles,
-         year = EXCLUDED.year, battery_health_pct = EXCLUDED.battery_health_pct,
-         body_condition = EXCLUDED.body_condition, flags = EXCLUDED.flags, fetched_at = NOW()`,
-      [...base, d.year ? parseInt(d.year, 10) : null, d.batteryHealthPct ?? null, d.bodyCondition || null,
-        JSON.stringify(d.flags || [])]
-    );
-  } catch (err) {
-    if (err.code !== '42703') throw err; // undefined_column → migration 010 not applied yet: save the old columns
-    await pool.query(
-      `INSERT INTO listings.listing_details
-         (listing_id, specs, description, condition, cpu, chip, ram_gb, ssd_gb, screen_in, battery_cycles, fetched_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
-       ON CONFLICT (listing_id) DO UPDATE SET
-         specs = EXCLUDED.specs, description = EXCLUDED.description, condition = EXCLUDED.condition,
-         cpu = EXCLUDED.cpu, chip = EXCLUDED.chip, ram_gb = EXCLUDED.ram_gb, ssd_gb = EXCLUDED.ssd_gb,
-         screen_in = EXCLUDED.screen_in, battery_cycles = EXCLUDED.battery_cycles, fetched_at = NOW()`,
-      base
-    );
-  }
-}
-
-async function getListingDetails(listingId) {
-  const res = await pool.query('SELECT * FROM listings.listing_details WHERE listing_id = $1', [listingId]);
-  const r = res.rows[0];
-  if (!r) return null;
-  return {
-    specs: r.specs || {}, description: r.description, condition: r.condition, cpu: r.cpu, chip: r.chip,
-    ramGb: r.ram_gb, ssdGb: r.ssd_gb, screenIn: r.screen_in != null ? parseFloat(r.screen_in) : null,
-    batteryCycles: r.battery_cycles,
-    // columns from migration 010; null/undefined → formatDetailsLines recomputes from the description
-    year: r.year != null ? String(r.year) : null, batteryHealthPct: r.battery_health_pct ?? null,
-    bodyCondition: r.body_condition ?? null, flags: Array.isArray(r.flags) ? r.flags : null,
-  };
-}
-
-// What the bot showed for a listing at notification time (see migration 009)
-async function saveMarketAssessment(listingId, { isUpdate, priceByn, stats, deviationPct }) {
-  await pool.query(
-    `INSERT INTO listings.market_assessments
-       (listing_id, is_update, price_byn, group_label, ref_source, ref_median,
-        active_n, active_median, sold_n, sold_median, deviation_pct)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-    [listingId, !!isUpdate, priceByn ?? null, stats.label, stats.refSource, stats.refMedian ?? null,
-     stats.activeN ?? 0, stats.activeMedian ?? null, stats.soldN ?? 0, stats.soldMedian ?? null, deviationPct ?? null]
-  );
-}
-
-// Active listings of a monitor that have no details row yet, freshest first
-async function getListingsWithoutDetails(monitorKey, limit) {
-  const res = await pool.query(
-    `SELECT l.id, l.external_id, l.url, l.title
-     FROM listings.listings l
-     LEFT JOIN listings.listing_details d ON d.listing_id = l.id
-     WHERE l.monitor_key = $1 AND l.status = 'active' AND l.url IS NOT NULL AND d.listing_id IS NULL
-     ORDER BY l.last_seen DESC
-     LIMIT $2`,
-    [monitorKey, limit]
-  );
-  return res.rows;
-}
+// ---- Sold tracking ----
 
 // Active listings that dropped out of search results for >= minAgeHours and were not
 // status-checked in the last recheckHours. Never-checked first, then oldest check.
@@ -366,8 +260,7 @@ async function closePool() {
 module.exports = {
   loadKnownIds, saveListing, saveNotification, addFollower, removeFollower, getFollowedListings, getFollowers, getPriceHistory,
   registerChat, getConfiguredChats, getSubscriptions, setSubscriptions, toggleSubscription, getSubscribers,
-  getMarketRows, getStaleActiveListings, recordStatusCheck,
-  saveListingDetails, getListingDetails, getListingsWithoutDetails, saveMarketAssessment,
+  getStaleActiveListings, recordStatusCheck,
   closePool,
   pool, // для доменных модулей (coins/store.js), которые ведут свои таблицы в той же базе
 };

@@ -3,8 +3,6 @@ const { chromium } = require('playwright');
 const store = require('./store');
 // Этот процесс ведёт только мониторы Kufar; площадки с другим source (ay.by → coins.js) живут отдельно
 const MONITORS = require('./config').MONITORS.filter((m) => !m.source || m.source === 'kufar');
-const market = require('./market');
-const details = require('./details');
 const { parseCoin } = require('./coins/parse');
 const cstore = require('./coins/store');
 const cmarket = require('./coins/market');
@@ -122,28 +120,6 @@ async function notify(listing, monitor, isUpdate = false, prev = null, listingId
     }
   }
 
-  let marketBlock = '';
-  let detailsLines = [];
-  if (monitor.market) {
-    if (!listing.details && listingId) {
-      listing.details = await store.getListingDetails(listingId).catch(() => null);
-    }
-    detailsLines = details.formatDetailsLines(listing.details);
-    const stats = await market.getMarketStats(monitor.key, listing, listingId).catch((err) => {
-      console.warn(`[Market] stats failed: ${err.message}`);
-      return null;
-    });
-    const priceByn = extractPriceFromStr(listing.price, 'р.');
-    marketBlock = market.formatMarketBlock(stats, priceByn);
-    // Keep what was shown, so the median's quality can be measured later against real sale speed
-    if (stats && listingId) {
-      await store.saveMarketAssessment(listingId, {
-        isUpdate, priceByn, stats, deviationPct: market.deviationPct(stats, priceByn),
-      }).catch((err) => console.warn(`[Market] assessment not saved: ${err.message}`));
-    }
-  }
-
-  // Market assessment above is recorded even when nobody is subscribed to this monitor
   const targets = recipientIds || await resolveRecipients(monitor);
   if (!TELEGRAM_BOT_TOKEN || !targets || targets.length === 0) {
     console.log('[Telegram] Not configured.');
@@ -157,10 +133,8 @@ async function notify(listing, monitor, isUpdate = false, prev = null, listingId
     (listing.params ? `${listing.params}\n` : '') +
     `💰 ${listing.price}\n` +
     (listing.extraLines && listing.extraLines.length ? `${listing.extraLines.join('\n')}\n` : '') +
-    (detailsLines.length ? `${detailsLines.join('\n')}\n` : '') +
     (diff ? `${diff}\n` : '') +
     priceHistoryBlock +
-    marketBlock +
     `<a href="${listingUrl}">Открыть объявление</a>`;
 
   for (const chatId of targets) {
@@ -298,17 +272,10 @@ async function checkMonitor(monitor, isFirstRun) {
 
     const newListings = listings.filter((l) => !knownIds.has(l.id));
     console.log(`  [${monitor.name}] ${listings.length} total, ${newListings.length} new`);
-    if (monitor.market && newListings.length) {
-      await attachDetails(monitor, newListings.slice(0, DETAILS_NEW_CAP));
-    }
 
     for (const listing of listings) {
       const isNew = !knownIds.has(listing.id);
       const { listingId, snapshotWritten, prev, isFirstSnapshot } = await store.saveListing(monitor.key, listing);
-      if (listing.details) {
-        await store.saveListingDetails(listingId, listing.details).catch((err) =>
-          console.warn(`  [Details] save failed for ${listing.id}: ${err.message}`));
-      }
 
       if (isNew) {
         if (monitor.domain === 'coins') {
@@ -409,81 +376,7 @@ async function checkFollowedListings() {
   await browser.close();
 }
 
-// ---- Listing details (characteristics + description) for market monitors ----
-const DETAILS_NEW_CAP = 15;   // new listings enriched per cycle; the rest are picked up by backfill
-const DETAILS_BACKFILL_BATCH = parseInt(process.env.DETAILS_BACKFILL_BATCH || '10', 10);
-
-async function withPage(fn) {
-  const browser = await chromium.launch({ headless: true });
-  try {
-    const context = await browser.newContext({ userAgent: USER_AGENT, locale: 'ru-BY' });
-    return await fn(await context.newPage());
-  } finally {
-    await browser.close();
-  }
-}
-
-function pause(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-// Opens each listing page and sets listing.details (parsed). Stops the batch on rate limiting.
-async function attachDetails(monitor, list) {
-  await withPage(async (page) => {
-    for (const listing of list) {
-      try {
-        const raw = await details.fetchListingDetails(page, listing.url);
-        if (!raw.gone) listing.details = details.parseDetails(listing.title, raw.specs, raw.description);
-      } catch (err) {
-        console.warn(`  [Details] [${monitor.name}] ${listing.url}: ${err.message}`);
-        if (/HTTP 429/.test(err.message)) break;
-      }
-      await pause(1200 + Math.random() * 1300);
-    }
-  }).catch((err) => console.error('  [Details] Error:', err.message));
-}
-
-// Fills details for listings stored before this feature existed (or skipped by the cap).
-// A 404 here also means the listing is gone → marked inactive.
-async function backfillDetails() {
-  for (const monitor of MONITORS.filter((m) => m.market)) {
-    let rows;
-    try {
-      rows = await store.getListingsWithoutDetails(monitor.key, DETAILS_BACKFILL_BATCH);
-    } catch (err) {
-      if (err.code === '42P01') {
-        console.warn('  [Details] table listing_details missing (apply migration 007), skipping');
-        return;
-      }
-      throw err;
-    }
-    if (!rows.length) continue;
-
-    let done = 0;
-    let gone = 0;
-    await withPage(async (page) => {
-      for (const row of rows) {
-        try {
-          const raw = await details.fetchListingDetails(page, row.url);
-          if (raw.gone) {
-            await store.recordStatusCheck(row.id, 'inactive');
-            gone++;
-          } else {
-            await store.saveListingDetails(row.id, details.parseDetails(row.title, raw.specs, raw.description));
-            done++;
-          }
-        } catch (err) {
-          console.warn(`  [Details] [${monitor.name}] ${row.url}: ${err.message}`);
-          if (/HTTP 429/.test(err.message)) break;
-        }
-        await pause(1200 + Math.random() * 1300);
-      }
-    }).catch((err) => console.error('  [Details] Error:', err.message));
-    console.log(`  [Details] [${monitor.name}] backfilled ${done}, gone ${gone}, left ${rows.length - done - gone}`);
-  }
-}
-
-// For monitors with market=true: listings that vanished from search results are opened
+// For monitors with trackSold=true: listings that vanished from search results are opened
 // one by one; a 404 (or "не найдено" page) marks them inactive = sold/removed.
 // Small batches per cycle so Kufar's rate limit is not hit.
 const SOLD_CHECK_BATCH = parseInt(process.env.SOLD_CHECK_BATCH || '12', 10);
@@ -491,7 +384,7 @@ const SOLD_CHECK_MIN_AGE_H = 6;    // not seen in results for this long (median 
 const SOLD_CHECK_RECHECK_H = 24;   // re-verify still-active ones this often
 
 async function checkSoldListings() {
-  const monitors = MONITORS.filter((m) => m.market || m.trackSold);
+  const monitors = MONITORS.filter((m) => m.trackSold);
   if (!monitors.length) return;
 
   let browser = null;
@@ -549,7 +442,6 @@ async function check(isFirstRun) {
   }
   await checkFollowedListings();
   await checkSoldListings();
-  await backfillDetails().catch((err) => console.error('  [Details] Error:', err.message));
 }
 
 // Без этой защиты при медленном Kufar (таймауты по 30 с) циклы по таймеру накладывались друг на друга,

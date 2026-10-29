@@ -1,12 +1,12 @@
 {
   "name": "kufar-monitor",
   "version": "1.0.0",
-  "description": "Monitor Kufar.by listings across configured search links and send Telegram notifications",
+  "description": "Kufar.by and ay.by monitor (silver coins) with Telegram notifications",
   "main": "listings.js",
   "type": "commonjs",
   "scripts": {
     "start": "node listings.js",
-    "test": "node test-market.js && node test-coins.js",
+    "test": "node test-coins.js",
     "coins": "node coins.js"
   },
   "dependencies": {

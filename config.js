@@ -7,9 +7,8 @@
 //           что отметили галочками.
 // optIn   — true: без legacy-рассылки вообще, получают только те, кто отметил категорию в /settings.
 //           Объявления при этом всё равно собираются в базу.
-// market  — true: в уведомление добавляется рыночная сводка (медиана по похожим объявлениям,
-//           выше/ниже рынка), а ушедшие с сайта объявления помечаются как проданные
-//           (см. market.js и checkSoldListings в listings.js).
+// trackSold — true: ушедшие с сайта объявления перепроверяются и помечаются проданными
+//           (checkSoldListings в listings.js).
 
 const MONITORS = [
   {
@@ -27,15 +26,6 @@ const MONITORS = [
     chatIds: null,
   },
   {
-    key: 'macbook',
-    name: 'MacBook',
-    emoji: '💻',
-    url: 'https://www.kufar.by/l/noutbuki/nb~apple/bez-posrednikov?sort=lst.d',
-    chatIds: null,
-    optIn: true,
-    market: true,
-  },
-  {
     // Монеты на Kufar: обычный Kufar-монитор (listings.js). domain='coins' включает фильтр: уведомления
     // только по серебру без копий и подборок (разбор заголовка через coins/parse.js). Данных о состоянии
     // у Kufar нет, оценка рынка для этой категории пока не строится.
@@ -46,7 +36,7 @@ const MONITORS = [
     url: 'https://www.kufar.by/l?cat=4170&clt=1&sort=lst.d',
     chatIds: null,
     optIn: true,
-    trackSold: true, // исчезнувшие объявления помечаются проданными (как у MacBook), без рыночной сводки MacBook
+    trackSold: true, // исчезнувшие объявления помечаются проданными
   },
   {
     // Аукцион ay.by, ведёт отдельный процесс coins.js (source='ayby'); listings.js этот монитор пропускает.
