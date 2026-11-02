@@ -28,6 +28,9 @@ function denominationFrom(title) {
   // дробные: «1/2 копейки», «1/4 копейки», «½ копейки» — иначе «2 копейки» ловится из «1/2»
   const frac = t.match(/(?:(1)\s*\/\s*([24])|½|¼)\s*коп/u);
   if (frac) return frac[2] ? 1 / parseInt(frac[2], 10) : (frac[0].startsWith('½') ? 0.5 : 0.25);
+  // «7 рублей 50 копеек» (золото 1897) → 750
+  const rk = t.match(/(?<![\d\/])(\d+)\s*руб\p{L}*\s+(\d{1,2})\s*коп/u);
+  if (rk) return parseInt(rk[1], 10) * 100 + parseInt(rk[2], 10);
   const m = t.match(/(?<![\d\/])(\d+(?:[.,]\d+)?)\s*(коп|руб|р\.|рубл)/u);
   if (m) {
     const n = parseFloat(m[1].replace(',', '.'));
@@ -39,7 +42,9 @@ function denominationFrom(title) {
   if (new RegExp(W('пятиалтынн\\p{L}*'), 'u').test(t)) return 15;
   if (new RegExp(W('гривенник\\p{L}*'), 'u').test(t)) return 10;
   if (new RegExp(W('рубль|рубля|рублей'), 'u').test(t)) return 100;
-  if (new RegExp(W('червонец|червонца'), 'u').test(t)) return 1000;
+  if (new RegExp(W('червонец|червонца|сеятель'), 'u').test(t)) return 1000;
+  if (new RegExp(W('полуимпериал\\p{L}*'), 'u').test(t)) return 500;
+  if (new RegExp(W('империал\\p{L}*'), 'u').test(t)) return 1000;
   return null;
 }
 
@@ -94,9 +99,13 @@ function metalFrom(title, sectionPath, denomKop, year, specMetal = null) {
   if (year >= 1921 && year <= 1931 && [10, 15, 20].includes(denomKop)) return 'silver';
   if (year >= 1921 && year <= 1927 && denomKop === 50) return 'silver';
   if (year >= 1921 && year <= 1924 && denomKop === 100) return 'silver';
+  // СССР: червонец 1923 и «Сеятель» 1975–1982 — золото
+  if (denomKop === 1000 && (year === 1923 || (year >= 1975 && year <= 1982))) return 'gold';
   if (year >= 1932 && year <= 1991 && denomKop != null && denomKop <= 100) return 'base';
   // Империя: рубли/полтины/25/20/15/10/5 коп с 1867 — серебро (5 коп серебряные до 1915 в билоне)
   if (year >= 1700 && year <= 1917 && [100, 50, 25, 20, 15, 10, 5].includes(denomKop) && !/медь|медн/.test(t)) return 'silver';
+  // Империя: 3, 5, 7½, 10, 15, 25, 37½ рублей — только золото (серебряных монет таких номиналов не было)
+  if (year >= 1700 && year <= 1917 && [300, 500, 750, 1000, 1500, 2500, 3750].includes(denomKop)) return 'gold';
   return null;
 }
 
@@ -155,6 +164,8 @@ function parseCoin({ title, sectionPath, conditionText, description, specs = {} 
     mintmaster: mint.mintmaster || null,
     metal,
     isSilver: metal === 'silver',
+    isGold: metal === 'gold',
+    isPrecious: metal === 'silver' || metal === 'gold',
     conditionCode: ay.code || null,
     grade: ay.grade || titleGrade || null,
     gradeSource: ay.grade ? 'ayby' : titleGrade ? 'title' : null,

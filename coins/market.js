@@ -106,7 +106,14 @@ function rarityTier({ konros = null, passes = null, windowYears = null, mintage 
 
 const sumSamples = (samples) => samples ? Object.values(samples).reduce((s, n) => s + (n || 0), 0) : null;
 
-function assess({ parsed, price, rows = [], excludeId = null, catalog = null, catalogs = null, coinType = null, bargainPct = BARGAIN_PCT, bargainByn = BARGAIN_BYN, minByn = BARGAIN_MIN_BYN }) {
+// Цена, ниже которой лот дорогого типа скорее копия, чем удача: ориентир ≥ SUSPECT_MIN_REF р., цена ≤ SUSPECT_SHARE
+// от ориентира. Проверяется только для фиксированных цен — ставка 9 р. в начале аукциона ничего не значит
+const SUSPECT_MIN_REF = 100;
+const SUSPECT_SHARE = 0.2;
+
+// metal — { metal, grams, value } из coins/metal.js: стоимость металла в монете, нижняя планка при любом состоянии.
+// fixedPrice — цена фиксированная (купить сейчас / Kufar), а не текущая ставка аукциона.
+function assess({ parsed, price, rows = [], excludeId = null, catalog = null, catalogs = null, coinType = null, metal = null, fixedPrice = false, bargainPct = BARGAIN_PCT, bargainByn = BARGAIN_BYN, minByn = BARGAIN_MIN_BYN }) {
   const market = marketEstimate(rows, parsed, excludeId);
   const list = catalogs || (catalog ? [catalog] : []);
   const cats = list.map((c) => {
@@ -130,10 +137,19 @@ function assess({ parsed, price, rows = [], excludeId = null, catalog = null, ca
   const gainByn = reference && hasPrice ? Math.round(reference - price) : null;
   const gd = list.find((c) => c.source === 'gdenashel');
   const rarity = coinType || gd ? rarityTier({ konros: coinType && coinType.konros, mintage: coinType && coinType.mintage, passes: gd ? sumSamples(gd.samples) : null, windowYears: gd ? gd.windowYears : null }) : null;
+  // Металл: не медиана, а пол. Он не участвует в выборе ориентира (иначе VF-рубль за 100 р. выглядел бы «выше
+  // ориентира 85 р.»), но лот ниже металла на порог выгоды — выгоден при любом состоянии
+  const metalValue = metal && metal.value > 0 ? metal.value : null;
+  const belowMetal = metalValue != null && hasPrice && isBargain({ price, reference: metalValue, bargainPct, bargainByn, minByn });
+  const metalGain = metalValue != null && hasPrice ? Math.round(metalValue - price) : null;
+  const byReference = isBargain({ price, reference, bargainPct, bargainByn, minByn });
+  const suspect = fixedPrice && hasPrice && reference >= SUSPECT_MIN_REF && price <= reference * SUSPECT_SHARE;
   return {
     market, catalog: cat, catalogs: cats, slabbed, rarity,
     reference, referenceSource, deviationPct, gainByn,
-    isBargain: isBargain({ price, reference, bargainPct, bargainByn, minByn }),
+    metal: metalValue != null ? { ...metal, gain: metalGain, below: belowMetal } : null,
+    suspect,
+    isBargain: byReference || belowMetal,
     bargainPct, bargainByn, minByn,
   };
 }
@@ -158,15 +174,22 @@ function formatEstimateLines(est) {
   if (est.market) lines.push(`📊 Наша база (${est.market.label}, ${est.market.grade}): ${fmt(est.market.refMedian)} по ${est.market.refSource === 'sold' ? `${est.market.soldN} продажам` : `${est.market.n} лотам`}${est.market.refSource !== 'sold' && est.market.soldN ? `, продаж ${est.market.soldN}` : ''}`);
   else lines.push('📊 Наша база: похожих лотов в этом состоянии ещё не было');
   if (est.rarity) lines.push(`💎 Редкость: ${est.rarity.name} ${est.rarity.emoji}${est.rarity.reason ? ` · ${est.rarity.reason}` : ''}`);
-  if (est.deviationPct != null) {
+  if (est.metal) {
+    const m = est.metal;
+    lines.push(`⚖️ Металл: ${String(m.grams).replace('.', ',')} г ${m.metal === 'gold' ? 'золота' : 'серебра'} ≈ ${fmt(m.value)}${m.pricePerG ? ` (НБРБ ${String(m.pricePerG).replace('.', ',')} р./г)` : ''}`);
+  }
+  if (est.metal && est.metal.below) {
+    lines.push(`🟢 На ${fmt(est.metal.gain)} ниже стоимости металла — выгодно при любом состоянии`);
+  } else if (est.deviationPct != null) {
     const base = est.referenceSource === 'market' ? 'нашей базы' : srcName(est.referenceSource).split(',')[0];
     if (est.isBargain) lines.push(`🟢 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base} — выгодно`);
     else if (est.deviationPct < 0) lines.push(`🟡 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base}`);
     else lines.push(`🔴 На ${est.deviationPct}% выше ${base}`);
   } else if (!est.reference) {
-    lines.push('⚪ Ориентира пока нет: ни каталога, ни трёх похожих лотов');
+    lines.push(est.metal ? '⚪ Ориентира по состоянию нет, лот выше стоимости металла' : '⚪ Ориентира пока нет: ни каталога, ни трёх похожих лотов');
   }
+  if (est.suspect) lines.push('⚠️ Подозрительно дёшево для этого типа — проверить подлинность (копии дорогих монет обычны)');
   return lines;
 }
 
-module.exports = { assess, isBargain, rarityTier, marketEstimate, catalogPrice, usablePrice, formatEstimateLines, median, BARGAIN_PCT, BARGAIN_BYN, BARGAIN_MIN_BYN, MIN_SAMPLES, TIERS };
+module.exports = { assess, isBargain, rarityTier, marketEstimate, catalogPrice, usablePrice, formatEstimateLines, median, BARGAIN_PCT, BARGAIN_BYN, BARGAIN_MIN_BYN, MIN_SAMPLES, TIERS, SUSPECT_MIN_REF, SUSPECT_SHARE };

@@ -7,6 +7,7 @@ const { parseCoin } = require('./coins/parse');
 const cstore = require('./coins/store');
 const cmarket = require('./coins/market');
 const numista = require('./coins/numista');
+const { metalValueLive } = require('./coins/metal');
 
 // Мониторы с domain='coins' (Kufar): каждое объявление разбирается и сохраняется в coin_lots,
 // уведомление — только серебро без копий/подборок и только при выгоде (ниже каталога или нашей оценки
@@ -16,15 +17,16 @@ async function assessCoinListing(listingId, listing) {
   const parsed = parseCoin({ title: listing.title, sectionPath: null, description: listing.params });
   const price = extractPriceFromStr(listing.price, 'р.');
   await cstore.upsertKufarLot(listingId, parsed, price).catch((err) => console.warn(`  [Coins] save failed: ${err.message}`));
-  if (!parsed.isSilver) return { notify: false, reason: 'не серебро' };
+  if (!parsed.isPrecious) return { notify: false, reason: 'не серебро и не золото' };
   if (parsed.flags.includes('копия') || parsed.flags.includes('несколько монет')) return { notify: false, reason: parsed.flags.join(', ') };
   if (Date.now() - coinRowsCache.at > 5 * 60e3) coinRowsCache = { at: Date.now(), rows: await cstore.getCoinRows(null).catch(() => []) };
-  // источники в карточке раздельно; ориентир: архив проходов (load-catalog.js) → Numista (если есть ключ) → наша медиана
+  // источники в карточке раздельно; ориентир — самый низкий с точным состоянием; металл — нижняя планка
   const { catalogs, type } = await cstore.getCatalogs(parsed).catch(() => ({ catalogs: [], type: null }));
   if (!catalogs.some((c) => c.source === 'numista')) { const n = await numista.lookup(parsed).catch(() => null); if (n) catalogs.push(n); }
-  const est = cmarket.assess({ parsed, price, rows: coinRowsCache.rows, excludeId: listingId, catalogs, coinType: type });
+  const metal = await metalValueLive(parsed).catch(() => null);
+  const est = cmarket.assess({ parsed, price, rows: coinRowsCache.rows, excludeId: listingId, catalogs, coinType: type, metal, fixedPrice: true });
   await cstore.saveEstimate(listingId, est).catch(() => {});
-  const coinLine = [parsed.denomination, parsed.year, parsed.mintmaster || parsed.mint, parsed.ruler, 'серебро'].filter(Boolean).join(' · ');
+  const coinLine = [parsed.denomination, parsed.year, parsed.mintmaster || parsed.mint, parsed.ruler, parsed.isGold ? 'золото' : 'серебро'].filter(Boolean).join(' · ');
   const lines = [`🔎 ${coinLine}`, parsed.grade ? `🏷 Состояние (из заголовка): ${parsed.grade}` : null, ...cmarket.formatEstimateLines(est)].filter(Boolean);
   if (!est.isBargain) return { notify: false, reason: est.deviationPct == null ? 'нет ориентира' : `${est.deviationPct}% к ${est.referenceSource}`, lines };
   return { notify: true, lines };

@@ -1,7 +1,8 @@
 // Загрузка архива проходов gdenashel.ru в listings.coin_sales и пересчёт каталога listings.coin_catalog
 // (медиана по типу монеты и состоянию за последние N лет, RUB → BYN по курсу НБРБ). Нужна миграция 012.
 //
-//   node load-catalog.js                      все разделы (серебро империи + серебро СССР), проходы за 3 года
+//   node load-catalog.js                      все разделы (серебро и золото империи, серебро и червонцы СССР), проходы за 3 года
+//   node load-catalog.js --only zoloto        только золото империи (плюс --only odin-chervonec для СССР)
 //   node load-catalog.js --years 5            окно 5 лет
 //   node load-catalog.js --only nikolay-ii    только разделы, в URL которых есть подстрока
 //   node load-catalog.js --rebuild-only       не ходить на сайт, только пересчитать каталог из coin_sales
@@ -26,9 +27,11 @@ const DRY = args.includes('--dry-run');
 const REBUILD_ONLY = args.includes('--rebuild-only');
 const SOURCE = 'gdenashel';
 
-// Разделы: серебро по правителям Российской империи и тиражное серебро СССР.
+// Разделы: серебро и золото по правителям Российской империи, тиражное серебро СССР, червонцы (1923 и «Сеятель» 1975–82).
 const IMPERIAL_RULERS = ['nikolay-ii', 'aleksandr-iii', 'aleksandr-ii', 'nikolay-i', 'aleksandr-i', 'pavel-i', 'ekaterina-ii', 'petr-iii', 'elizaveta', 'ioann-antonovich', 'anna-ioannovna', 'petr-ii', 'ekaterina-i', 'petr-i'];
+const IMPERIAL_METALS = ['serebro', 'zoloto'];
 const USSR_PAGES = ['10-kopeek', '15-kopeek', '20-kopeek', '50-kopeek', 'odin-poltinnik', '1-rubl'].map((d) => `${g.BASE}/coins/sssr/tirajnye/1921-1958/${d}`);
+const USSR_GOLD_PAGES = [`${g.BASE}/coins/sssr/tirajnye/1921-1958/odin-chervonec`, `${g.BASE}/coins/sssr/yubileynye/zoloto/odin-chervonec`];
 
 // СССР: серебро — 10/15/20 коп 1921–1931, полтинники 1921–1927, рубли 1921–1924; только тиражные (не пробные, не местные)
 function ussrSilver(row) {
@@ -38,6 +41,8 @@ function ussrSilver(row) {
   if (row.denomKop === 100) return row.year <= 1924;
   return false;
 }
+// СССР: червонец 1923 и «Сеятель» 1975–1982 (не пробные)
+const ussrGold = (row) => row.denomKop === 1000 && !!row.year && !/\/probnye\//.test(row.coinUrl);
 
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const cutoff = new Date(Date.now() - YEARS * 365.25 * 86400e3).toISOString().slice(0, 10);
@@ -48,14 +53,17 @@ const wanted = (url) => !ONLY || url.includes(ONLY);
 async function collectListPages() {
   const pages = [];
   for (const ruler of IMPERIAL_RULERS) {
-    const section = `${g.BASE}/coins/imperiya/${ruler}/serebro`;
-    if (ONLY && !ONLY.includes(ruler) && !section.includes(ONLY)) continue;
-    const html = await g.fetchHtml(section).catch((err) => { console.warn(`[Catalog] ${section}: ${err.message}`); return null; });
-    await pause(DELAY_MS);
-    if (!html) continue;
-    for (const url of g.parseDenominationLinks(html, section)) if (wanted(url)) pages.push({ url, filter: null });
+    for (const metal of IMPERIAL_METALS) {
+      const section = `${g.BASE}/coins/imperiya/${ruler}/${metal}`;
+      if (ONLY && !ONLY.includes(ruler) && !section.includes(ONLY)) continue;
+      const html = await g.fetchHtml(section).catch((err) => { console.warn(`[Catalog] ${section}: ${err.message}`); return null; });
+      await pause(DELAY_MS);
+      if (!html) continue; // у ранних правителей золота может не быть — раздел отдаёт 404
+      for (const url of g.parseDenominationLinks(html, section)) if (wanted(url)) pages.push({ url, filter: null });
+    }
   }
   for (const url of USSR_PAGES) if (wanted(url)) pages.push({ url, filter: ussrSilver });
+  for (const url of USSR_GOLD_PAGES) if (wanted(url)) pages.push({ url, filter: ussrGold });
   return pages;
 }
 

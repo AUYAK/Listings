@@ -96,21 +96,21 @@ check('итог торгов и фильтр уведомлений', () => {
   assert.strictEqual(decideOutcome({ bids: 0 }, { statusText: 'Лот продан', bids: 0 }), 'sold');
   assert.strictEqual(decideOutcome({ bids: 2 }, { statusText: null, bids: 2 }), 'sold');
   assert.strictEqual(decideOutcome({ bids: 0 }, { statusText: 'Торги завершены без ставок', bids: 0 }), 'unsold');
-  const monitor = { silverOnly: true };
-  assert.strictEqual(worthNotifying(monitor, { isSilver: true, flags: [] }, { ended: false }), true);
-  assert.strictEqual(worthNotifying(monitor, { isSilver: false, flags: [] }, { ended: false }), false);
-  assert.strictEqual(worthNotifying(monitor, { isSilver: true, flags: ['копия'] }, { ended: false }), false);
-  assert.strictEqual(worthNotifying(monitor, { isSilver: true, flags: [] }, { ended: true }), false);
+  const monitor = { metals: ['silver'] };
+  assert.strictEqual(worthNotifying(monitor, { isSilver: true, metal: 'silver', flags: [] }, { ended: false }), true);
+  assert.strictEqual(worthNotifying(monitor, { isSilver: false, metal: 'copper', flags: [] }, { ended: false }), false);
+  assert.strictEqual(worthNotifying(monitor, { isSilver: true, metal: 'silver', flags: ['копия'] }, { ended: false }), false);
+  assert.strictEqual(worthNotifying(monitor, { isSilver: true, metal: 'silver', flags: [] }, { ended: true }), false);
 });
 check('когда слать: фикс-цена сразу, аукцион — за ≤12 ч до конца', () => {
-  const monitor = { silverOnly: true };
-  const silver = { isSilver: true, flags: [] };
+  const monitor = { metals: ['silver'] };
+  const silver = { isSilver: true, metal: 'silver', flags: [] };
   const h = (n) => new Date(Date.now() + n * 3600e3);
   assert.strictEqual(notifyTiming(monitor, silver, { ended: false, saleType: 'buy_now', endsAt: h(72) }), 'now');
   assert.strictEqual(notifyTiming(monitor, silver, { ended: false, saleType: 'auction_buynow', endsAt: h(72) }), 'now');
   assert.strictEqual(notifyTiming(monitor, silver, { ended: false, saleType: 'auction', endsAt: h(72) }), 'closing');
   assert.strictEqual(notifyTiming(monitor, silver, { ended: false, saleType: 'auction', endsAt: h(AUCTION_NOTIFY_HOURS - 1) }), 'now');
-  assert.strictEqual(notifyTiming(monitor, { isSilver: false, flags: [] }, { ended: false, saleType: 'auction', endsAt: h(1) }), 'never');
+  assert.strictEqual(notifyTiming(monitor, { isSilver: false, metal: 'copper', flags: [] }, { ended: false, saleType: 'auction', endsAt: h(1) }), 'never');
 });
 check('фильтр монет для Kufar по заголовку', () => {
   const { parseCoin } = require('./coins/parse');
@@ -367,6 +367,81 @@ check('лимит папки: сначала удаляются непродан
   assert.ok(fs.existsSync(path.join(dir, '2026-09/111_1.jpg')) && fs.existsSync(path.join(dir, '2026-10/444_1.jpg')));
   assert.strictEqual(ph.enforceLimit(new Set()).removed, 0); // уже в лимите — ничего не трогаем
   fs.rmSync(dir, { recursive: true, force: true });
+});
+
+console.log('золото и металл:');
+check('золотые номиналы и металл по году', () => {
+  assert.strictEqual(denominationFrom('7 рублей 50 копеек 1897'), 750);
+  assert.strictEqual(denominationFrom('Чевонец Сеятель 1982 год! Золото!'), 1000);
+  assert.strictEqual(denominationFrom('Полуимпериал 1896'), 500);
+  const gold = (t) => parseCoin({ title: t, sectionPath: null });
+  assert.strictEqual(gold('10 рублей 1899 года АГ Николай 2').metal, 'gold');
+  assert.strictEqual(gold('5 рублей 1902г. NGC AU58').isGold, true);
+  assert.strictEqual(gold('3 рубля 1875').metal, 'gold');
+  assert.strictEqual(gold('Червонец 1923').metal, 'gold');
+  assert.strictEqual(gold('1 рубль 1898 АГ').isPrecious, true);
+  assert.strictEqual(gold('1 рубль 1898 АГ').isGold, false);
+  assert.strictEqual(gold('10 рублей 2005 Беларусь серебро').metal, 'silver'); // НБ РБ: 10 рублей — серебро, не золотой империал
+  assert.strictEqual(gold('20 лир 1863 Италия. Золотая монета').denomKop, null);
+});
+check('содержание металла и стоимость по НБРБ', () => {
+  const { fineContent, metalValue } = require('./coins/metal');
+  const P = { gold: 366.94, silver: 4.51 };
+  const v = (t) => metalValue(parseCoin({ title: t, sectionPath: null }), P);
+  assert.deepStrictEqual(fineContent(parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null })), { metal: 'silver', grams: 18 });
+  assert.strictEqual(v('1 рубль 1898 АГ').value, 81.18);
+  assert.strictEqual(v('Полтинник 1924 ПЛ').grams, 9);
+  assert.strictEqual(v('15 копеек 1908').grams, 1.35);
+  assert.strictEqual(v('20 копеек 1861').grams, 3);        // до 1867 — 750/868 проба
+  assert.strictEqual(v('10 рублей 1899 АГ').value, 2840.12);
+  assert.strictEqual(v('10 рублей 1894 АГ').grams, 11.61);  // до 1897 — 12,9 г
+  assert.strictEqual(v('5 рублей 1902').grams, 3.87);
+  assert.strictEqual(v('Червонец Сеятель 1979 ЛМД').grams, 7.74);
+  assert.strictEqual(v('20 копеек 1932'), null);            // не драгметалл
+  assert.strictEqual(v('1 рубль 1965'), null);
+  assert.strictEqual(metalValue(parseCoin({ title: '1 рубль 1898', sectionPath: null }), null), null);
+});
+check('оценка: металл — нижняя планка, не ориентир; подозрительно дёшево', () => {
+  const rub = parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
+  const metal = { metal: 'silver', grams: 18, pricePerG: 4.51, value: 81.18 };
+  // ориентир 150 (VF), лот 100: выше металла, ниже ориентира на 33% → выгодно по ориентиру; металл не ориентир
+  const a = cm.assess({ parsed: rub, price: 100, rows: [], catalog: { source: 'gdenashel', prices: { VF: 150 } }, metal });
+  assert.strictEqual(a.reference, 150);
+  assert.strictEqual(a.metal.below, false);
+  assert.strictEqual(a.isBargain, true);
+  // ориентира нет, лот 100 выше металла 81 → не выгодно, без красной строки
+  const b = cm.assess({ parsed: rub, price: 100, rows: [], metal });
+  assert.strictEqual(b.reference, null);
+  assert.strictEqual(b.isBargain, false);
+  const bl = cm.formatEstimateLines(b);
+  assert.ok(bl.includes('⚖️ Металл: 18 г серебра ≈ 81 р. (НБРБ 4,51 р./г)'), bl.join('\n'));
+  assert.ok(bl.includes('⚪ Ориентира по состоянию нет, лот выше стоимости металла'), bl.join('\n'));
+  // лот 25 р. ниже металла на 56 р. → выгодно при любом состоянии, даже без ориентира
+  const c = cm.assess({ parsed: rub, price: 25, rows: [], metal });
+  assert.strictEqual(c.isBargain, true);
+  assert.strictEqual(c.metal.below, true);
+  assert.ok(cm.formatEstimateLines(c).includes('🟢 На 56 р. ниже стоимости металла — выгодно при любом состоянии'));
+  // золото: 10 рублей 1899 за 2 500 при металле 2 840 → ниже металла на 340 → выгодно
+  const ten = parseCoin({ title: '10 рублей 1899 АГ', sectionPath: null, conditionText: 'II (Эстетическое, XF)' });
+  const g = cm.assess({ parsed: ten, price: 2500, rows: [], metal: { metal: 'gold', grams: 7.74, pricePerG: 366.94, value: 2840.12 } });
+  assert.strictEqual(g.isBargain, true);
+  assert.ok(cm.formatEstimateLines(g).includes('⚖️ Металл: 7,74 г золота ≈ 2 840 р. (НБРБ 366,94 р./г)'));
+  // подозрительно дёшево: фикс-цена 15 р. при ориентире 150 → флаг; та же цена как ставка аукциона — без флага
+  const s = cm.assess({ parsed: rub, price: 15, rows: [], catalog: { source: 'gdenashel', prices: { VF: 150 } }, fixedPrice: true });
+  assert.strictEqual(s.suspect, true);
+  assert.ok(cm.formatEstimateLines(s).at(-1).startsWith('⚠️ Подозрительно дёшево'));
+  assert.strictEqual(cm.assess({ parsed: rub, price: 15, rows: [], catalog: { source: 'gdenashel', prices: { VF: 150 } } }).suspect, false);
+  assert.strictEqual(cm.assess({ parsed: rub, price: 15, rows: [], catalog: { source: 'gdenashel', prices: { VF: 60 } }, fixedPrice: true }).suspect, false); // дешёвый тип — не копируют
+});
+check('монитор: металл и страна по пути раздела', () => {
+  const { matchesMonitor } = require('./coins');
+  const goldMon = { metals: ['gold'], countries: [/Росси/i, /СССР/i] };
+  const ten = parseCoin({ title: '10 рублей 1899 АГ', sectionPath: null });
+  assert.strictEqual(matchesMonitor(goldMon, ten, 'Монеты › Россия › Российская Империя (до 1917) › 1894-1917 (Николай II)'), true);
+  assert.strictEqual(matchesMonitor(goldMon, parseCoin({ title: 'Червонец Сеятель 1980', sectionPath: null }), 'Монеты › СССР › 1961-1991'), true);
+  assert.strictEqual(matchesMonitor(goldMon, parseCoin({ title: 'Соверен 1883', sectionPath: null, specs: { 'Металл': 'Золото' } }), 'Монеты › Европа › Великобритания'), false);
+  assert.strictEqual(matchesMonitor(goldMon, parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null }), 'Монеты › Россия'), false); // серебро — не для золотого монитора
+  assert.strictEqual(matchesMonitor({ metals: ['silver'] }, parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null })), true);
 });
 
 console.log(`\nпроверок пройдено: ${passed}`);

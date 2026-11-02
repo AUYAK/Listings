@@ -27,8 +27,8 @@ const MONITORS = [
   },
   {
     // Монеты на Kufar: обычный Kufar-монитор (listings.js). domain='coins' включает фильтр: уведомления
-    // только по серебру без копий и подборок (разбор заголовка через coins/parse.js). Данных о состоянии
-    // у Kufar нет, оценка рынка для этой категории пока не строится.
+    // только по серебру и золоту без копий и подборок (разбор заголовка через coins/parse.js). Состояния
+    // у Kufar нет, поэтому ориентир в основном — стоимость металла в монете.
     key: 'coins-kufar',
     name: 'Монеты (Kufar)',
     emoji: '🪙',
@@ -42,6 +42,7 @@ const MONITORS = [
     // Аукцион ay.by, ведёт отдельный процесс coins.js (source='ayby'); listings.js этот монитор пропускает.
     // sections: корневые разделы; discover — регулярки по уровням вложенности, по которым
     // на лету находятся подразделы (правители → «Серебро (...)»). Нужные подразделы СССР перечислены явно.
+    // metals — какие монеты считать подходящими (остальные только сохраняются в базу).
     key: 'coins-silver',
     name: 'Монеты (серебро)',
     emoji: '🪙',
@@ -50,11 +51,27 @@ const MONITORS = [
     url: 'https://coins.ay.by/',
     chatIds: null,
     optIn: true,
-    silverOnly: true,
+    metals: ['silver'],
     sections: [
       { url: 'https://coins.ay.by/rossiya/rossijskaya-imperiya-do-1917/', discover: [/^\d{4}-\d{4}/, /^Серебро/] },
       { url: 'https://coins.ay.by/sssr/1921-1941/', discover: [/^(10 копеек|15 копеек|20 копеек|Полтинники|Рубли)$/] },
     ],
+  },
+  {
+    // Золото на ay.by лежит не в разделах правителей, а в сквозном разделе «Золото» (topic.phtml), где рядом
+    // соверены, лиры и монеты Нацбанка РБ. countries — по пути раздела лота оставляем Империю и СССР:
+    // по ним есть архив проходов gdenashel.ru и таблица содержания металла (coins/metal.js).
+    key: 'coins-gold',
+    name: 'Монеты (золото)',
+    emoji: '🥇',
+    source: 'ayby',
+    domain: 'coins',
+    url: 'https://coins.ay.by/topic.phtml?f=1&ti1=6',
+    chatIds: null,
+    optIn: true,
+    metals: ['gold'],
+    countries: [/Росси/i, /СССР/i],
+    sections: [{ url: 'https://coins.ay.by/topic.phtml?f=1&ti1=6' }],
   },
 ];
 

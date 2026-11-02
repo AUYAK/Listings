@@ -11,6 +11,7 @@ const { parseCoin } = require('./coins/parse');
 const cmarket = require('./coins/market');
 const numista = require('./coins/numista');
 const photos = require('./coins/photos');
+const { metalValueLive } = require('./coins/metal');
 const tg = require('./telegram');
 const { MONITORS } = require('./config');
 
@@ -107,16 +108,17 @@ function notifyTiming(monitor, parsed, lot) {
 
 // Оценка лота: каталог (Numista, если есть ключ) + наша медиана по похожим; сохраняется в базе
 let rowsCache = { at: 0, rows: [] };
-async function assessLot(listingId, parsed, price) {
+async function assessLot(listingId, parsed, price, saleType = null) {
   if (Date.now() - rowsCache.at > 5 * 60e3) rowsCache = { at: Date.now(), rows: await cstore.getCoinRows(null) };
-  // источники показываются в карточке раздельно; ориентир для «выгодно» — архив проходов (load-catalog.js),
-  // иначе Numista (если есть ключ), иначе наша медиана по похожим лотам
+  // источники показываются в карточке раздельно; ориентир для «выгодно» — самый низкий из источников с точным
+  // состоянием (архив проходов, Numista, наша медиана); стоимость металла — нижняя планка при любом состоянии
   const { catalogs, type } = await cstore.getCatalogs(parsed).catch((err) => { console.warn(`[Catalog] ${err.message}`); return { catalogs: [], type: null }; });
-  if (parsed.isSilver && !catalogs.some((c) => c.source === 'numista')) {
+  if (parsed.isPrecious && !catalogs.some((c) => c.source === 'numista')) {
     const n = await numista.lookup(parsed).catch((err) => { console.warn(`[Numista] ${err.message}`); return null; });
     if (n) catalogs.push(n);
   }
-  const est = cmarket.assess({ parsed, price, rows: rowsCache.rows, excludeId: listingId, catalogs, coinType: type });
+  const metal = await metalValueLive(parsed).catch((err) => { console.warn(`[Metal] ${err.message}`); return null; });
+  const est = cmarket.assess({ parsed, price, rows: rowsCache.rows, excludeId: listingId, catalogs, coinType: type, metal, fixedPrice: saleType === 'buy_now' });
   await cstore.saveEstimate(listingId, est).catch((err) => console.warn(`  [Estimate] save failed: ${err.message}`));
   return est;
 }
@@ -170,7 +172,7 @@ async function notifyClosingSoon(page, monitor) {
       if (r.gone) { await finalizeGone(row, 'before closing'); continue; }
       if (r.lot.ended) continue; // итог запишет finalizeEnded
       if (notifyTiming(monitor, r.parsed, r.lot) === 'now') {
-        const est = await assessLot(row.id, r.parsed, r.lot.price);
+        const est = await assessLot(row.id, r.parsed, r.lot.price, r.lot.saleType);
         if (est.isBargain) {
           const n = await notifyLot(monitor, row.id, r.lot, r.parsed, true, est);
           if (n) sent++;
@@ -191,9 +193,18 @@ async function notifyClosingSoon(page, monitor) {
 }
 
 // Стоит ли уведомлять: серебро (если монитор только про серебро), не копия, не подборка, торги идут
+// Монета подходит монитору: металл из monitor.metals (['silver'] / ['gold']), страна по пути раздела лота
+// (monitor.countries — регулярки; нужен для сквозных разделов вроде «Золото», где рядом лежат соверены и лиры)
+function matchesMonitor(monitor, parsed, categoryPath = null) {
+  if (!parsed) return false;
+  if (monitor.metals && !monitor.metals.includes(parsed.metal)) return false;
+  if (monitor.countries && !monitor.countries.some((re) => re.test(categoryPath || ''))) return false;
+  return true;
+}
+
 function worthNotifying(monitor, parsed, lot) {
   if (lot.ended) return false;
-  if (monitor.silverOnly && !parsed.isSilver) return false;
+  if (!matchesMonitor(monitor, parsed, lot.categoryPath)) return false;
   if (parsed.flags.includes('копия') || parsed.flags.includes('несколько монет')) return false;
   return true;
 }
@@ -219,10 +230,10 @@ async function scanMonitor(page, monitor, isFirstRun) {
 
   for (const section of sections) {
     for (let p = 1; p <= pages; p++) {
-      const url = p === 1 ? section : `${section}?page=${p}`;
+      const url = p === 1 ? section : `${section}${section.includes('?') ? '&' : '?'}page=${p}`; // сквозные разделы — topic.phtml?f=1&ti1=6
       let cards;
       try { cards = await ayby.scanListPage(page, url); ok(); } catch (err) { console.warn(`  [Scan] ${url}: ${err.message}`); failed(err); break; }
-      if (!cards.length) break;
+      if (!cards.length) { if (p === 1) console.warn(`  [Scan] ${url}: карточек нет — раздел пуст или другая разметка (проверить: node debug-list.js "${url}")`); break; }
       for (const card of cards) {
         seen++;
         const { listingId } = await store.saveListing(monitor.key, listingFromCard(card));
@@ -235,16 +246,16 @@ async function scanMonitor(page, monitor, isFirstRun) {
   console.log(`  [${monitor.name}] просмотрено ${seen} карточек, новых ${fresh.length}${seeding ? ' (засев, без уведомлений)' : ''}`);
   if (seeding) return;
 
-  let notified = 0, silver = 0;
+  let notified = 0, matched = 0;
   for (const { listingId, card, section } of fresh.slice(0, DETAIL_BATCH)) {
     try {
       const r = await fetchAndSave(page, listingId, card.url, section, { monitorKey: monitor.key, externalId: card.id });
       ok();
       if (r.gone) { await cstore.recordOutcome(listingId, { outcome: 'removed', statusText: '404 at first fetch' }); continue; }
-      if (r.parsed.isSilver) silver++;
+      if (matchesMonitor(monitor, r.parsed, r.lot.categoryPath)) matched++;
       const timing = notifyTiming(monitor, r.parsed, r.lot);
       if (timing === 'now') {
-        const est = await assessLot(listingId, r.parsed, r.lot.price);
+        const est = await assessLot(listingId, r.parsed, r.lot.price, r.lot.saleType);
         if (est.isBargain) {
           const n = await notifyLot(monitor, listingId, r.lot, r.parsed, false, est);
           if (n) notified++;
@@ -264,7 +275,7 @@ async function scanMonitor(page, monitor, isFirstRun) {
     }
     await jitter(900);
   }
-  console.log(`  [${monitor.name}] подробности: ${Math.min(fresh.length, DETAIL_BATCH)}, серебро ${silver}, уведомлений ${notified}`);
+  console.log(`  [${monitor.name}] подробности: ${Math.min(fresh.length, DETAIL_BATCH)}, подходящих ${matched}, уведомлений ${notified}`);
 }
 
 async function backfillDetails(page, monitor) {
@@ -285,10 +296,10 @@ async function backfillDetails(page, monitor) {
   console.log(`  [Backfill] ${monitor.name}: дочитано ${done}, исчезло ${gone}, осталось ≥ ${rows.length - done - gone}`);
 }
 
-// Стоит ли хранить фото лота: серебро, не копия, не подборка, есть ставки (то есть лот будет продан)
+// Стоит ли хранить фото лота: подходит монитору, не копия, не подборка, есть ставки (то есть лот будет продан)
 function worthPhotos(monitor, parsed, bids) {
   if (!(bids > 0)) return false;
-  if (monitor.silverOnly && !(parsed && parsed.isSilver)) return false;
+  if (!matchesMonitor(monitor, parsed)) return false;
   return !(parsed && parsed.flags && (parsed.flags.includes('копия') || parsed.flags.includes('несколько монет')));
 }
 
@@ -430,4 +441,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildCaption, decideOutcome, worthNotifying, worthPhotos, notifyTiming, assessLot, AUCTION_NOTIFY_HOURS, PRECLOSE_MIN };
+module.exports = { buildCaption, decideOutcome, worthNotifying, worthPhotos, notifyTiming, matchesMonitor, assessLot, AUCTION_NOTIFY_HOURS, PRECLOSE_MIN };

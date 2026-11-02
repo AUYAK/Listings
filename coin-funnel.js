@@ -18,7 +18,7 @@ const pct = (n, total) => total ? ` (${Math.round((n / total) * 100)}%)` : '';
 function reasonFor(a) {
   const p = a.parsed || {};
   const flags = p.flags || [];
-  if (!p.isSilver) return 'не серебро';
+  if (!(p.isPrecious || p.isSilver || p.isGold)) return 'не серебро и не золото';
   if (flags.includes('копия')) return 'копия';
   if (flags.includes('несколько монет')) return 'подборка / несколько монет';
   if (!a.detail_fetched_at) return 'страница лота не дочитана (только карточка списка)';
@@ -61,14 +61,14 @@ async function main() {
 
   for (const key of [...new Set(rows.map((r) => r.monitor_key))]) {
     const lots = rows.filter((r) => r.monitor_key === key);
-    const silver = lots.filter((r) => r.parsed && r.parsed.isSilver);
+    const silver = lots.filter((r) => r.parsed && (r.parsed.isPrecious || r.parsed.isSilver || r.parsed.isGold));
     const sent = lots.filter((r) => r.sent).length;
     const considered = lots.filter((r) => r.notified_at).length;
-    console.log(`== ${key}: лотов ${lots.length}, серебро ${silver.length}, уведомлений отправлено ${sent} (≈ ${(sent / days).toFixed(1)} в день), рассмотрено и закрыто ${considered}`);
+    console.log(`== ${key}: лотов ${lots.length}, серебро+золото ${silver.length}, уведомлений отправлено ${sent} (≈ ${(sent / days).toFixed(1)} в день), рассмотрено и закрыто ${considered}`);
 
     const counts = new Map();
     for (const r of silver) { const b = bucket(reasonFor(r)); counts.set(b, (counts.get(b) || 0) + 1); }
-    console.log('  Причины по серебру:');
+    console.log('  Причины по серебру и золоту:');
     for (const [b, n] of [...counts].sort((x, y) => y[1] - x[1])) console.log(`    ${String(n).padStart(4)}${pct(n, silver.length).padEnd(7)} ${b}`);
 
     // Насколько не дотянули: распределение отклонения среди лотов с ориентиром
@@ -95,7 +95,7 @@ async function main() {
   }
 
   // Что пропустили: проданные (итог известен) ниже ориентира, без уведомления
-  const sold = rows.filter((r) => r.outcome === 'sold' && r.final_price != null && r.parsed && r.parsed.isSilver && !r.sent && r.est_reference != null)
+  const sold = rows.filter((r) => r.outcome === 'sold' && r.final_price != null && r.parsed && (r.parsed.isPrecious || r.parsed.isSilver) && !r.sent && r.est_reference != null)
     .map((r) => ({ ...r, gain: Number(r.est_reference) - Number(r.final_price) }))
     .filter((r) => r.gain > 0)
     .sort((a, b) => b.gain - a.gain);
@@ -107,7 +107,7 @@ async function main() {
   }
 
   // Проданные дорого без ориентира — там, где каталога не хватает
-  const noRef = rows.filter((r) => r.outcome === 'sold' && r.final_price != null && r.parsed && r.parsed.isSilver && r.est_reference == null)
+  const noRef = rows.filter((r) => r.outcome === 'sold' && r.final_price != null && r.parsed && (r.parsed.isPrecious || r.parsed.isSilver) && r.est_reference == null)
     .sort((a, b) => Number(b.final_price) - Number(a.final_price));
   console.log(`\n== Проданы без ориентира (каталог не покрыл): ${noRef.length} лотов, топ-${Math.min(top, 10)} по цене`);
   for (const r of noRef.slice(0, 10)) {
