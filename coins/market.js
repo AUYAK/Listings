@@ -1,6 +1,7 @@
-// Оценка монеты: каталожная цена (Numista) и наша медиана по похожим лотам того же состояния.
-// Ориентир для «выгодно/нет» — каталог; если каталога нет — наша оценка; если нет и её — лот
-// только сохраняется, уведомление не уходит.
+// Оценка монеты: цены источников (архив проходов gdenashel.ru, Numista) и наша медиана по похожим лотам
+// того же состояния. Ориентир для «выгодно/нет» — самый низкий из источников с ТОЧНЫМ состоянием лота;
+// если точного нет ни у кого — ближайшее состояние ниже из каталогов; если нет и его — лот только
+// сохраняется, уведомление не уходит.
 
 const { groupKeys, GRADE_ORDER } = require('./parse');
 
@@ -23,12 +24,13 @@ const median = (arr) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
-// Цена лота, пригодная для статистики: итог продажи; фикс-цена; ставка, если ставки были
+// Цена лота, пригодная для статистики: итог продажи или фикс-цена. Текущая ставка идущего аукциона
+// не берётся: 9 р. за сутки до конца — не цена монеты, а только тянет медиану вниз
 function usablePrice(r) {
   const sold = r.outcome === 'sold' || (r.source === 'kufar' && r.status === 'inactive');
   if (sold) return { price: parseFloat(r.final_price ?? r.current_price), sold: true };
   if (r.outcome) return null; // не продан / снят — цена ничего не говорит
-  if (r.sale_type === 'auction' && !(r.bids > 0)) return null;
+  if (r.sale_type === 'auction' || r.sale_type === 'auction_buynow') return null;
   const p = parseFloat(r.current_price);
   return p >= MIN_PRICE ? { price: p, sold: false } : null;
 }
@@ -112,10 +114,12 @@ function assess({ parsed, price, rows = [], excludeId = null, catalog = null, ca
     return cp ? { ...cp, source: c.source, title: c.title, samples: c.samples ? c.samples[cp.grade] : null, passes: sumSamples(c.samples), windowYears: c.windowYears || null, factor: c.factor } : null;
   }).filter(Boolean);
   const cat = cats[0] || null;
-  // Ориентир — самый низкий из источников: архив РФ за слабы даёт в разы больше, чем стоит сырая монета у нас,
-  // и «выгодно» по завышенному ориентиру ничего не стоит
-  const candidates = [...cats.map((c) => ({ price: c.price, source: c.source })), ...(market ? [{ price: market.refMedian, source: 'market' }] : [])]
-    .filter((c) => c.price > 0).sort((a, b) => a.price - b.price);
+  // Ориентир — самый низкий из источников с точным состоянием лота (сравнивать VF с «ближайшим XF» нельзя);
+  // ближайшее состояние ниже — только если точного нет ни у кого. Минимум, а не первый источник: архив РФ
+  // за слабы даёт в разы больше, чем стоит сырая монета у нас, и «выгодно» по завышенному ориентиру ничего не стоит
+  const asCandidate = (c) => ({ price: c.price, source: c.source });
+  const exact = [...cats.filter((c) => c.exact).map(asCandidate), ...(market ? [{ price: market.refMedian, source: 'market' }] : [])];
+  const candidates = (exact.length ? exact : cats.map(asCandidate)).filter((c) => c.price > 0).sort((a, b) => a.price - b.price);
   const reference = candidates.length ? candidates[0].price : null;
   const referenceSource = candidates.length ? candidates[0].source : null;
   // Слабы MS64+ по тому же типу — только для справки при UNC/AU-лотах

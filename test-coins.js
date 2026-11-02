@@ -221,11 +221,19 @@ check('строки оценки в карточке', () => {
   const slab = cm.assess({ parsed: unc, price: 9, rows: uncRows,
     catalogs: [{ source: 'gdenashel', prices: { 'MS64+': 458, XF: 40 }, samples: { 'MS64+': 4, XF: 6 }, windowYears: 3 }] });
   assert.strictEqual(slab.catalog.grade, 'XF'); // ближайшее состояние ниже UNC, MS64+ не в шкале
-  assert.strictEqual(slab.reference, 40);
-  assert.strictEqual(slab.referenceSource, 'gdenashel');
+  assert.strictEqual(slab.reference, 100); // точное состояние есть только у нашей базы → она ориентир, а не «ближайший XF»
+  assert.strictEqual(slab.referenceSource, 'market');
   const slabLines = cm.formatEstimateLines(slab);
   assert.ok(slabLines.includes('🏛 gdenashel.ru, слабы MS64+, 4 прох. за 3 г.: 458 р. — для справки, не ориентир'), slabLines.join('\n'));
-  assert.ok(slabLines.at(-1).startsWith('🟢 На 77% (31 р.) ниже gdenashel.ru'), slabLines.at(-1));
+  assert.ok(slabLines.at(-1).startsWith('🟢 На 91% (91 р.) ниже нашей базы'), slabLines.at(-1));
+  // точного состояния нет ни у кого → ближайшее ниже из каталога
+  const nearest = cm.assess({ parsed: unc, price: 9, rows: [], catalogs: [{ source: 'gdenashel', prices: { XF: 40 } }] });
+  assert.strictEqual(nearest.reference, 40);
+  assert.strictEqual(nearest.catalog.exact, false);
+  // ставка идущего аукциона — не цена для нашей базы; итог торгов и фикс-цена — да
+  assert.strictEqual(cm.usablePrice({ sale_type: 'auction', current_price: 9, bids: 5, outcome: null }), null);
+  assert.deepStrictEqual(cm.usablePrice({ sale_type: 'auction', current_price: 9, final_price: 120, bids: 12, outcome: 'sold' }), { price: 120, sold: true });
+  assert.deepStrictEqual(cm.usablePrice({ sale_type: 'buy_now', current_price: 95, outcome: null }), { price: 95, sold: false });
 });
 check('редкость: шкала Конроса, иначе частота проходов', () => {
   assert.strictEqual(cm.rarityTier({}).name, 'обычная');
