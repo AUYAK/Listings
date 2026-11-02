@@ -32,7 +32,8 @@ function reasonFor(a) {
     const gain = Math.round(ref - price);
     return `ниже ориентира, но не дотянул до порога (−${Math.round(((ref - price) / ref) * 100)}%, ${gain} р.)`;
   }
-  if (a.notified_at) return 'уведомлён';
+  if (a.sent) return 'уведомление отправлено';
+  if (a.notified_at) return 'выгодно по текущей оценке, но при рассмотрении не прошло (оценка или цена с тех пор изменились)';
   if (a.outcome) return 'выгодно по оценке, но торги закончились без уведомления';
   if (a.sale_type === 'auction') {
     const hoursLeft = a.ends_at ? (new Date(a.ends_at) - Date.now()) / 3600e3 : null;
@@ -49,8 +50,10 @@ function bucket(reason) {
 async function main() {
   console.log(`Порог: выгода ≥ ${BARGAIN_BYN} р., либо ≤ −${BARGAIN_PCT}% и ≥ ${BARGAIN_MIN_BYN} р.; аукционы — за ${AUCTION_NOTIFY_HOURS} ч до конца. Окно: ${days} дн.\n`);
 
+  // notified_at в coin_lots = «рассмотрен, больше не трогаем» (в том числе отклонён); реально отправленные — в listing_notifications
   const { rows } = await pool.query(
-    `SELECT l.id, l.url, l.title, l.monitor_key, l.first_seen, a.*
+    `SELECT l.id, l.url, l.title, l.monitor_key, l.first_seen, a.*,
+            EXISTS (SELECT 1 FROM listings.listing_notifications n WHERE n.listing_id = l.id) AS sent
      FROM listings.listings l JOIN listings.coin_lots a ON a.listing_id = l.id
      WHERE l.first_seen >= NOW() - ($1 || ' days')::interval
      ORDER BY l.first_seen`, [String(days)]);
@@ -59,8 +62,9 @@ async function main() {
   for (const key of [...new Set(rows.map((r) => r.monitor_key))]) {
     const lots = rows.filter((r) => r.monitor_key === key);
     const silver = lots.filter((r) => r.parsed && r.parsed.isSilver);
-    const notified = lots.filter((r) => r.notified_at).length;
-    console.log(`== ${key}: лотов ${lots.length}, серебро ${silver.length}, уведомлений ${notified} (≈ ${(notified / days).toFixed(1)} в день)`);
+    const sent = lots.filter((r) => r.sent).length;
+    const considered = lots.filter((r) => r.notified_at).length;
+    console.log(`== ${key}: лотов ${lots.length}, серебро ${silver.length}, уведомлений отправлено ${sent} (≈ ${(sent / days).toFixed(1)} в день), рассмотрено и закрыто ${considered}`);
 
     const counts = new Map();
     for (const r of silver) { const b = bucket(reasonFor(r)); counts.set(b, (counts.get(b) || 0) + 1); }
@@ -91,7 +95,7 @@ async function main() {
   }
 
   // Что пропустили: проданные (итог известен) ниже ориентира, без уведомления
-  const sold = rows.filter((r) => r.outcome === 'sold' && r.final_price != null && r.parsed && r.parsed.isSilver && !r.notified_at && r.est_reference != null)
+  const sold = rows.filter((r) => r.outcome === 'sold' && r.final_price != null && r.parsed && r.parsed.isSilver && !r.sent && r.est_reference != null)
     .map((r) => ({ ...r, gain: Number(r.est_reference) - Number(r.final_price) }))
     .filter((r) => r.gain > 0)
     .sort((a, b) => b.gain - a.gain);
@@ -99,7 +103,7 @@ async function main() {
   for (const r of sold.slice(0, top)) {
     console.log(`  ${r.url}`);
     console.log(`     итог ${fmt(r.final_price)} (${r.final_bids ?? '?'} ставок) · ориентир ${fmt(r.est_reference)} (${r.est_catalog_src || 'наша база'}) · +${Math.round(r.gain)} р. · ${r.grade || '—'} · ${r.sale_type} · закончился ${when(r.ended_at)}`);
-    console.log(`     причина на момент оценки: ${reasonFor({ ...r, notified_at: null, outcome: null, ends_at: null })}`);
+    console.log(`     причина на момент оценки: ${reasonFor({ ...r, sent: false, notified_at: null, outcome: null, ends_at: null })}`);
   }
 
   // Проданные дорого без ориентира — там, где каталога не хватает
