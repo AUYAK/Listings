@@ -23,8 +23,14 @@ function rulerFor(year) {
 }
 
 // Номинал в копейках: «50 копеек», «полтина», «1 рубль», «1,5 рубля», «25 пенни» (финские — не берём)
+// Стартовая ставка аукциона в заголовке: «С 1 РУБЛЯ!», «от 1 руб.», «старт 1 р.», «с рубля» — не номинал
+const START_BID_RE = /(?<!\p{L})(?:с|от|старт\p{L}*|(?:начальная\s+|стартовая\s+)?цена)\s*:?\s*(?:\d+(?:[.,]\d+)?\s*)?(?:бел\.?\s*)?(?:руб\p{L}*|р\.|byn)(?!\p{L})/giu;
+function stripStartBid(t) {
+  return t.replace(START_BID_RE, ' ');
+}
+
 function denominationFrom(title) {
-  const t = (title || '').toLowerCase().replace(/ё/g, 'е');
+  const t = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е'));
   // дробные: «1/2 копейки», «1/4 копейки», «½ копейки» — иначе «2 копейки» ловится из «1/2»
   const frac = t.match(/(?:(1)\s*\/\s*([24])|½|¼)\s*коп/u);
   if (frac) return frac[2] ? 1 / parseInt(frac[2], 10) : (frac[0].startsWith('½') ? 0.5 : 0.25);
@@ -138,13 +144,20 @@ const FLAG_PATTERNS = [
   ['чистка', /чищен|чистк|почищ|полиров|зачищ/iu],
   ['повреждения', /царап|забоин|потерт|вмятин|гнут|изгиб|коррози|окисл|пятн|следы/iu],
   ['слаб', /\bngc\b|\bpcgs\b|ннр|рнга|слаб/iu],
-  ['несколько монет', /лот из \d|подборк|набор|\d+\s*шт\b|\d+\s*штук/iu],
+  // «лот из 3», «одним лотом 3 монеты», «3 монеты», «20 15 10 копеек», «1 и 2 копейки»
+  ['несколько монет', /лот из \d|подборк|набор|\d+\s*шт\b|\d+\s*штук|одним лотом|(?<![\d\/])(?:[2-9]|[1-9]\d{1,2})\s*монет|(?<![\d\/])(?:\d{1,2}[\s,;]+(?:и\s+)?)+\d{1,2}\s*коп/iu],
   ['редкая', /редк|\bR\b|\bR[1-9]\b|биткин\s*r/iu],
 ];
 function flagsFrom(title, description) {
   const t = `${title || ''}\n${description || ''}`;
   const flags = [];
   for (const [label, re] of FLAG_PATTERNS) if (re.test(t)) flags.push(label);
+  // Два и более номинала в заголовке («5 копеек 1899 и 10 копеек 1913») — тоже набор; «7 рублей 50 копеек» — один
+  if (!flags.includes('несколько монет')) {
+    const tt = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е')).replace(/\d+\s*руб\p{L}*\s+\d{1,2}\s*коп\p{L}*/gu, 'X');
+    const denoms = tt.match(/(?<![\d\/.,])\d+(?:[.,]\d+)?\s*(?:коп|руб)/gu) || [];
+    if (denoms.length >= 2) flags.push('несколько монет');
+  }
   return flags;
 }
 

@@ -71,6 +71,21 @@ check('флаги и правитель', () => {
   assert.ok(p.flags.includes('несколько монет'));
   const c = parseCoin({ title: '1 рубль 1912 КОПИЯ', sectionPath: null });
   assert.ok(c.flags.includes('копия'));
+  // стартовая ставка «с 1 рубля» — не номинал; набор из нескольких монет — флаг
+  const set = parseCoin({ title: 'С 1 РУБЛЯ! ОДНИМ ЛОТОМ 3 МОНЕТЫ РОССИЙСКАЯ ИМПЕРИЯ 20 15 10 КОПЕЕК 1875 1867 1910 ГОД СЕРЕБРО', sectionPath: null });
+  assert.notStrictEqual(set.denomKop, 100);
+  assert.ok(set.flags.includes('несколько монет'));
+  assert.strictEqual(parseCoin({ title: 'От 1 руб. 50 копеек 1912 ЭБ', sectionPath: null }).denomKop, 50);
+  assert.strictEqual(parseCoin({ title: 'Старт 1 р. Полтинник 1924 ПЛ', sectionPath: null }).denomKop, 50);
+  assert.strictEqual(parseCoin({ title: 'Рубль 1913 с рубля', sectionPath: null }).denomKop, 100);
+  const isSet = (t) => parseCoin({ title: t, sectionPath: null }).flags.includes('несколько монет');
+  assert.strictEqual(isSet('3 монеты 1921-1931 серебро'), true);
+  assert.strictEqual(isSet('1 и 2 копейки 1913'), true);
+  assert.strictEqual(isSet('Лот 5 копеек 1899 и 10 копеек 1913'), true);
+  assert.strictEqual(isSet('7 рублей 50 копеек 1897'), false);
+  assert.strictEqual(isSet('1/2 копейки 1912'), false);
+  assert.strictEqual(isSet('1 рубль 1924 ПЛ цена 90 руб'), false);
+  assert.strictEqual(isSet('Монета 1 рубль 1912 300 лет 1613-1913'), false);
   assert.strictEqual(parseCoin({ title: '1 рубль 1768 СПБ', sectionPath: null }).ruler, 'Екатерина II');
   assert.strictEqual(parseCoin({ title: 'Полтинник 1924 ПЛ', sectionPath: 'СССР' }).ruler, 'СССР');
 });
