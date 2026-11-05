@@ -1,5 +1,7 @@
 require('dotenv').config();
 const store = require('./store');
+const cstore = require('./coins/store');
+const bid = require('./coins/bid');
 const { MONITORS } = require('./config');
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -73,7 +75,51 @@ async function handleMessage(msg) {
   if (/^\/(start|settings)(@\w+)?(\s|$)/.test(text)) {
     console.log(`[Settings] ${text.split(' ')[0]} from chat=${chatId}`);
     await sendSettings(chatId);
+    return;
   }
+  if (/^\/bids(@\w+)?(\s|$)/.test(text)) { await sendBids(chatId); return; }
+  if (msg.reply_to_message) await handleBidReply(msg, chatId, text);
+}
+
+// ---- Снайп-ставки: ответ на карточку лота ay.by числом ----
+
+const SNIPE_CHAT_IDS = (process.env.SNIPE_CHAT_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
+const snipeAllowed = (chatId) => (SNIPE_CHAT_IDS.length ? SNIPE_CHAT_IDS : DEFAULT_CHAT_IDS).includes(String(chatId));
+const fmtDate = (d) => new Date(d).toLocaleString('ru-BY', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Minsk' });
+
+async function reply(msg, text) {
+  await tg('sendMessage', { chat_id: msg.chat.id, text, parse_mode: 'HTML', reply_to_message_id: msg.message_id, disable_web_page_preview: true });
+}
+
+async function handleBidReply(msg, chatId, text) {
+  const order = bid.parseBidReply(text);
+  if (!order) return; // ответ не про ставку
+  if (!snipeAllowed(chatId)) { await reply(msg, 'Ставки из этого чата не разрешены (SNIPE_CHAT_IDS / TELEGRAM_CHAT_IDS в .env).'); return; }
+  const lot = await cstore.lotByMessage(chatId, msg.reply_to_message.message_id);
+  if (!lot) { await reply(msg, 'Не нашёл лот по этому сообщению. Ответьте на карточку лота ay.by.'); return; }
+  if (lot.source !== 'ayby' || !/auction/.test(lot.sale_type || '')) { await reply(msg, 'Это не аукцион ay.by, ставку поставить нельзя.'); return; }
+  if (lot.outcome || (lot.ends_at && new Date(lot.ends_at) < Date.now())) { await reply(msg, 'Торги по этому лоту уже закончились.'); return; }
+  if (order.cancel) {
+    const c = await cstore.cancelBid(lot.id);
+    await reply(msg, c ? `Заявка до ${bid.fmt(c.max_byn)} отменена.` : 'Активной заявки по этому лоту нет.');
+    console.log(`[Bids] chat=${chatId} cancel lot ${lot.external_id}: ${c ? 'ok' : 'none'}`);
+    return;
+  }
+  if (lot.current_price != null && order.max <= Number(lot.current_price)) {
+    await reply(msg, `Максимум ${bid.fmt(order.max)} не выше текущей цены ${bid.fmt(lot.current_price)}. Нужно больше.`);
+    return;
+  }
+  await cstore.setBid(lot.id, chatId, order.max);
+  console.log(`[Bids] chat=${chatId} lot ${lot.external_id}: max ${order.max}`);
+  await reply(msg, `🎯 Снайп: до <b>${bid.fmt(order.max)}</b> на «${lot.title}».\nСейчас ${bid.fmt(lot.current_price)} · ${lot.bids || 0} ставок · до ${lot.ends_at ? fmtDate(lot.ends_at) : '?'}.\nБот поставит максимум за ${bid.SNIPE_SECONDS} с до конца и отчитается. Изменить: ответьте другим числом, отменить: «отмена».`);
+}
+
+async function sendBids(chatId) {
+  const rows = await cstore.openBids(chatId);
+  if (!rows.length) { await tg('sendMessage', { chat_id: chatId, text: 'Активных заявок нет. Ответьте на карточку лота ay.by числом — это максимальная ставка.' }); return; }
+  const st = { pending: '⏳ ждёт', running: '🎯 в работе', placed: '✅ поставлена' };
+  const lines = rows.map((r) => `${st[r.status] || r.status} до ${bid.fmt(r.max_byn)} — <a href="${r.url}">${r.title}</a>, сейчас ${bid.fmt(r.current_price)}, конец ${r.ends_at ? fmtDate(r.ends_at) : '?'}`);
+  await tg('sendMessage', { chat_id: chatId, text: lines.join('\n'), parse_mode: 'HTML', disable_web_page_preview: true });
 }
 
 async function handleCallback(cb) {

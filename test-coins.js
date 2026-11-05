@@ -472,4 +472,17 @@ check('избранное ay.by: строка в карточке, выключ�
   assert.ok(!buildCaption(mon, lot, parsed, false, null, null).includes('⭐'));
 });
 
+check('снайп: разбор ответа в Telegram', () => {
+  const { parseBidReply } = require('./coins/bid');
+  assert.deepStrictEqual(parseBidReply('150'), { max: 150 });
+  assert.deepStrictEqual(parseBidReply('150 р.'), { max: 150 });
+  assert.deepStrictEqual(parseBidReply('Макс 150,50 руб'), { max: 150.5 });
+  assert.deepStrictEqual(parseBidReply('до 2 500'), { max: 2500 });
+  assert.deepStrictEqual(parseBidReply('отмена'), { cancel: true });
+  assert.deepStrictEqual(parseBidReply('0'), { cancel: true });
+  assert.strictEqual(parseBidReply('спасибо'), null);
+  assert.strictEqual(parseBidReply('1898 АГ хорошая'), null);
+  assert.strictEqual(parseBidReply(''), null);
+});
+
 console.log(`\nпроверок пройдено: ${passed}`);

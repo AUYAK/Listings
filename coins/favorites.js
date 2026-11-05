@@ -130,4 +130,12 @@ async function add(lotUrl, lotId) {
   }
 }
 
-module.exports = { enabled, open, close, add, login, isLoggedIn, hasFavorite, clickFavorite, ensureLoggedIn, FAV_BUTTON, SESSION_FILE, LOGIN_URL, FAVORITES_URL };
+// Страница в контексте аккаунта (для снайп-ставок: sniper.js, debug-bid.js); вход выполняется при необходимости
+async function newPage() {
+  if (!context) throw new Error('контекст аккаунта не открыт (favorites.open(browser))');
+  const page = await context.newPage();
+  try { await ensureLoggedIn(page); } catch (err) { await page.close().catch(() => {}); throw err; }
+  return page;
+}
+
+module.exports = { enabled, open, close, add, login, isLoggedIn, hasFavorite, clickFavorite, ensureLoggedIn, newPage, saveSession, assertNotVerification, FAV_BUTTON, SESSION_FILE, LOGIN_URL, FAVORITES_URL, LOGIN };

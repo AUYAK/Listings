@@ -287,7 +287,87 @@ async function rebuildCatalogFromSales(source, years, rate, minSamples = 2) {
   return byKey.size;
 }
 
+// ---- Снайп-ставки (listings.coin_bids, миграция 015) ----
+
+// Лот по сообщению бота в чате. Карточка — альбом из нескольких фото с подряд идущими message_id,
+// а сохранён id первого; ответ на любое фото альбома ведём к ближайшему сохранённому id не позже него.
+async function lotByMessage(chatId, msgId) {
+  const res = await pool.query(
+    `SELECT l.id, l.external_id, l.url, l.title, l.monitor_key, a.sale_type, a.ends_at, a.current_price, a.bids, a.outcome, a.source
+     FROM listings.listing_notifications n
+     JOIN listings.listings l ON l.id = n.listing_id
+     JOIN listings.coin_lots a ON a.listing_id = l.id
+     WHERE n.telegram_chat_id = $1 AND n.telegram_msg_id BETWEEN $2 - 9 AND $2
+     ORDER BY n.telegram_msg_id DESC LIMIT 1`,
+    [String(chatId), msgId]
+  );
+  return res.rows[0] || null;
+}
+
+async function setBid(listingId, chatId, maxByn) {
+  await pool.query(
+    `INSERT INTO listings.coin_bids (listing_id, chat_id, max_byn)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (listing_id) DO UPDATE SET chat_id = EXCLUDED.chat_id, max_byn = EXCLUDED.max_byn,
+       status = 'pending', note = NULL, placed_price = NULL, placed_at = NULL, reported_at = NULL, updated_at = NOW()`,
+    [listingId, String(chatId), maxByn]
+  );
+}
+
+async function cancelBid(listingId) {
+  const res = await pool.query(
+    `UPDATE listings.coin_bids SET status = 'cancelled', updated_at = NOW()
+     WHERE listing_id = $1 AND status IN ('pending', 'running') RETURNING max_byn`,
+    [listingId]
+  );
+  return res.rows[0] || null;
+}
+
+async function getBid(listingId) {
+  const res = await pool.query('SELECT * FROM listings.coin_bids WHERE listing_id = $1', [listingId]);
+  return res.rows[0] || null;
+}
+
+async function updateBid(listingId, { status, note, placedPrice, placedAt, reportedAt } = {}) {
+  await pool.query(
+    `UPDATE listings.coin_bids SET
+       status = COALESCE($2, status), note = COALESCE($3, note), placed_price = COALESCE($4, placed_price),
+       placed_at = COALESCE($5, placed_at), reported_at = COALESCE($6, reported_at), updated_at = NOW()
+     WHERE listing_id = $1`,
+    [listingId, status ?? null, note ?? null, placedPrice ?? null, placedAt ?? null, reportedAt ?? null]
+  );
+}
+
+// Заявки, торги по которым заканчиваются в ближайшие minutes минут (или уже закончились, но итог не отправлен)
+async function bidsDue(minutes) {
+  const res = await pool.query(
+    `SELECT b.*, l.external_id, l.url, l.title, a.ends_at, a.current_price, a.bids, a.outcome
+     FROM listings.coin_bids b
+     JOIN listings.listings l ON l.id = b.listing_id
+     JOIN listings.coin_lots a ON a.listing_id = b.listing_id
+     WHERE b.status = 'pending' AND a.ends_at IS NOT NULL AND a.ends_at <= NOW() + ($1 || ' minutes')::interval
+     ORDER BY a.ends_at ASC`,
+    [String(minutes)]
+  );
+  return res.rows;
+}
+
+// Все активные заявки чата (для /bids)
+async function openBids(chatId) {
+  const res = await pool.query(
+    `SELECT b.*, l.external_id, l.url, l.title, a.ends_at, a.current_price, a.bids
+     FROM listings.coin_bids b
+     JOIN listings.listings l ON l.id = b.listing_id
+     JOIN listings.coin_lots a ON a.listing_id = b.listing_id
+     WHERE b.chat_id = $1 AND b.status IN ('pending', 'running', 'placed')
+     ORDER BY a.ends_at ASC NULLS LAST`,
+    [String(chatId)]
+  );
+  return res.rows;
+}
+
 module.exports = {
+  lotByMessage, setBid, cancelBid, getBid, updateBid, bidsDue, openBids,
   upsertCard, saveLotDetails, recordOutcome, touchEndsAt, markNotified, markFavorited, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
   lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles,
   getLot, getCoinRows, upsertKufarLot, saveEstimate,

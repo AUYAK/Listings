@@ -13,6 +13,7 @@ const numista = require('./coins/numista');
 const photos = require('./coins/photos');
 const { metalValueLive } = require('./coins/metal');
 const favorites = require('./coins/favorites');
+const { SNIPE_SECONDS } = require('./coins/bid');
 const tg = require('./telegram');
 const { MONITORS } = require('./config');
 
@@ -144,6 +145,7 @@ function buildCaption(monitor, lot, parsed, closing = false, est = null, fav = n
     ...cmarket.formatEstimateLines(est),
     lot.sellerCity ? `📍 ${lot.sellerCity}` : null,
     fav ? (fav.ok ? '⭐ Добавлено в избранное ay.by' : `⭐ В избранное не добавлено: ${fav.note}`) : null,
+    favorites.enabled() && /auction/.test(lot.saleType || '') ? `✍️ Ответьте числом — максимальная ставка, бот поставит её за ${SNIPE_SECONDS} с до конца` : null,
     `<a href="${lot.url}">Открыть лот</a>`,
   ].filter(Boolean);
   return lines.join('\n');
