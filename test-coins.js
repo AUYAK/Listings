@@ -462,7 +462,7 @@ check('монитор: металл и страна по пути раздела
 check('избранное ay.by: строка в карточке, выключено без логина', () => {
   const { buildCaption } = require('./coins');
   const favorites = require('./coins/favorites');
-  assert.strictEqual(favorites.enabled(), Boolean(process.env.AYBY_LOGIN && process.env.AYBY_PASSWORD));
+  assert.strictEqual(favorites.enabled(), favorites.hasCredentials() || favorites.hasSession());
   assert.ok(favorites.FAV_BUTTON.test(' В избранное ') && favorites.FAV_BUTTON.test('Добавить в избранное') && !favorites.FAV_BUTTON.test('Избранное'));
   const mon = { name: 'Монеты (золото)', emoji: '🥇' };
   const lot = { title: '10 рублей 1899 АГ', price: 2500, saleType: 'buy_now', url: 'https://ay.by/lot/x-1.html', photos: [] };

@@ -16,7 +16,7 @@ const ai = args.indexOf('--amount');
 const amount = ai >= 0 ? parseFloat(String(args[ai + 1]).replace(',', '.')) : null;
 const confirm = args.includes('--confirm');
 if (!url) { console.error('usage: node debug-bid.js <url лота> [--amount N] [--confirm]'); process.exit(1); }
-if (!fav.enabled()) { console.error('AYBY_LOGIN / AYBY_PASSWORD не заданы в .env'); process.exit(1); }
+if (!fav.enabled()) { console.error('нет сессии ay.by: выполните node ayby-login.js'); process.exit(1); }
 
 function dump(name, html) {
   fs.mkdirSync('debug', { recursive: true });
@@ -31,7 +31,7 @@ function dump(name, html) {
   let page;
   try {
     page = await fav.newPage();
-    console.log(`вход: ок (${process.env.AYBY_LOGIN})`);
+    console.log('вход: ок');
     const st = await bid.openLot(page, url);
     console.log(`\n== лот: title «${await page.title()}», HTTP ${st.httpStatus}`);
     console.log(`  до конца ${st.remaining} с, цена ${st.price}, мин. ставка ${st.minBid}, ставок ${st.bids}, закончен ${st.ended}, кнопка ставки ${st.hasBidButton}, резерв не пройден ${st.reserveNotMet}, наша ставка ${st.yours}`);

@@ -2,7 +2,7 @@
 // (listings.coin_bids). Этот процесс раз в POLL_MS берёт заявки, торги по которым заканчиваются в ближайшие
 // LEAD_MIN минут, открывает лот под аккаунтом AYBY_LOGIN, ждёт по таймеру лота и за SNIPE_SECONDS до конца
 // ставит максимум. После окончания читает итог и отчитывается в Telegram.
-// Запуск: node sniper.js. Нужна миграция 014, в .env — AYBY_LOGIN, AYBY_PASSWORD (и желательно AYBY_NICK).
+// Запуск: node sniper.js. Нужна миграция 014 и сессия ay.by (node ayby-login.js), желательно AYBY_NICK в .env.
 require('dotenv').config();
 const { chromium } = require('playwright');
 const cstore = require('./coins/store');
@@ -145,7 +145,7 @@ async function tick() {
 }
 
 async function main() {
-  if (!favorites.enabled()) { console.error('AYBY_LOGIN / AYBY_PASSWORD не заданы в .env — снайперу нечем ставить'); process.exit(1); }
+  if (!favorites.enabled()) { console.error('нет сессии ay.by: выполните node ayby-login.js (или задайте AYBY_LOGIN / AYBY_PASSWORD в .env)'); process.exit(1); }
   log(`started: ставка за ${SNIPE} с до конца, заявки берутся за ${LEAD_MIN} мин, опрос каждые ${POLL_MS / 1000} с${NICK ? `, ник ${NICK}` : ', AYBY_NICK не задан'}`);
   await tick();
   setInterval(tick, POLL_MS);

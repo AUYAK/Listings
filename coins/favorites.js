@@ -1,7 +1,10 @@
-// Избранное ay.by: выгодный лот добавляется в избранное аккаунта (AYBY_LOGIN / AYBY_PASSWORD в .env).
+// Избранное ay.by: выгодный лот добавляется в избранное аккаунта.
+// Вход в аккаунт — один из двух способов:
+//   1) node ayby-login.js на сервере: открывается окно браузера, пользователь входит сам, cookies сохраняются
+//      в AYBY_SESSION_FILE (пароль нигде не хранится; при протухании сессии — повторить);
+//   2) AYBY_LOGIN / AYBY_PASSWORD в .env: вход выполняется автоматически, когда сессия протухла.
 // Аккаунт живёт в отдельном контексте браузера, чтобы сканирование сотен страниц шло анонимно и не
-// связывалось с учётной записью. Сессия (cookies) сохраняется в AYBY_SESSION_FILE и переживает перезапуски,
-// вход выполняется только когда сессия протухла.
+// связывалось с учётной записью.
 // Проверка результата — не по кнопке, а по странице «Избранное»: там должен появиться id лота.
 // Отладка на сервере: node debug-favorite.js <url лота>
 
@@ -17,7 +20,10 @@ const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
 const NAV_TIMEOUT = parseInt(process.env.COINS_NAV_TIMEOUT_MS || '30000', 10);
 const FAV_BUTTON = /^\s*(?:добавить\s+)?в\s+избранное\s*$/i;
 
-const enabled = () => Boolean(LOGIN && PASSWORD);
+const hasCredentials = () => Boolean(LOGIN && PASSWORD);
+const hasSession = () => fs.existsSync(SESSION_FILE);
+const enabled = () => hasCredentials() || hasSession();
+const RELOGIN_HINT = `сессия ay.by не активна — выполните на сервере: node ayby-login.js`;
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (msg) => console.log(`  [Favorites] ${msg}`);
 
@@ -80,6 +86,7 @@ async function login(page) {
 async function ensureLoggedIn(page) {
   if (loggedIn) return;
   if (await isLoggedIn(page)) { loggedIn = true; return; }
+  if (!hasCredentials()) throw new Error(RELOGIN_HINT);
   await login(page);
   loggedIn = true;
 }
@@ -138,4 +145,7 @@ async function newPage() {
   return page;
 }
 
-module.exports = { enabled, open, close, add, login, isLoggedIn, hasFavorite, clickFavorite, ensureLoggedIn, newPage, saveSession, assertNotVerification, FAV_BUTTON, SESSION_FILE, LOGIN_URL, FAVORITES_URL, LOGIN };
+module.exports = {
+  enabled, hasCredentials, hasSession, open, close, add, login, isLoggedIn, hasFavorite, clickFavorite, ensureLoggedIn, newPage, saveSession,
+  assertNotVerification, FAV_BUTTON, SESSION_FILE, LOGIN_URL, FAVORITES_URL, LOGIN, USER_AGENT, RELOGIN_HINT,
+};
