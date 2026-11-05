@@ -12,6 +12,7 @@ const cmarket = require('./coins/market');
 const numista = require('./coins/numista');
 const photos = require('./coins/photos');
 const { metalValueLive } = require('./coins/metal');
+const favorites = require('./coins/favorites');
 const tg = require('./telegram');
 const { MONITORS } = require('./config');
 
@@ -123,7 +124,7 @@ async function assessLot(listingId, parsed, price, saleType = null) {
   return est;
 }
 
-function buildCaption(monitor, lot, parsed, closing = false, est = null) {
+function buildCaption(monitor, lot, parsed, closing = false, est = null, fav = null) {
   const saleLabel = { auction: 'аукцион', buy_now: 'купить сейчас', auction_buynow: 'аукцион + купить сейчас' }[lot.saleType] || '';
   const priceLine = lot.saleType === 'buy_now'
     ? `💰 ${priceStr(lot.price)}${lot.bargain ? ' · возможен торг' : ''}`
@@ -142,16 +143,27 @@ function buildCaption(monitor, lot, parsed, closing = false, est = null) {
     parsed.flags.length ? `⚠️ ${parsed.flags.join(', ')}` : null,
     ...cmarket.formatEstimateLines(est),
     lot.sellerCity ? `📍 ${lot.sellerCity}` : null,
+    fav ? (fav.ok ? '⭐ Добавлено в избранное ay.by' : `⭐ В избранное не добавлено: ${fav.note}`) : null,
     `<a href="${lot.url}">Открыть лот</a>`,
   ].filter(Boolean);
   return lines.join('\n');
 }
 
+// Выгодный лот: сначала в избранное аккаунта ay.by (если настроено), потом карточка подписчикам
+async function addToFavorites(listingId, lot) {
+  if (!favorites.enabled()) return null;
+  const fav = await favorites.add(lot.url, lot.externalId);
+  if (fav.ok) await cstore.markFavorited(listingId).catch(() => {});
+  console.log(`  [Favorites] [${lot.externalId}] ${fav.ok ? 'в избранном' : 'не добавлен'}: ${fav.note}`);
+  return fav;
+}
+
 async function notifyLot(monitor, listingId, lot, parsed, closing = false, est = null) {
   await cstore.markNotified(listingId).catch(() => {}); // даже без получателей второй раз не шлём
+  const fav = await addToFavorites(listingId, lot);
   const targets = await tg.resolveRecipients(monitor);
   if (!tg.isConfigured() || !targets.length) return 0;
-  const caption = buildCaption(monitor, lot, parsed, closing, est);
+  const caption = buildCaption(monitor, lot, parsed, closing, est, fav);
   let sent = 0;
   for (const chatId of targets) {
     const msgId = await tg.sendCard(chatId, caption, lot.photos || []);
@@ -213,6 +225,7 @@ async function fetchAndSave(page, listingId, url, sectionPath, extras = {}) {
   const lot = await ayby.fetchLot(page, url);
   if (lot.gone) return { gone: true };
   lot.url = url;
+  lot.externalId = extras.externalId || (url.match(/-(\d+)\.html/) || [null, null])[1];
   const parsed = parseCoin({ title: lot.title, sectionPath: lot.categoryPath || sectionPath, conditionText: lot.conditionText, description: lot.description, specs: lot.specs });
   await cstore.saveLotDetails(listingId, lot, parsed);
   // цена со страницы точнее карточки → снапшот
@@ -409,6 +422,7 @@ async function cycle(isFirstRun) {
   try {
     const context = await browser.newContext({ userAgent: USER_AGENT, locale: 'ru-BY' });
     const page = await context.newPage();
+    await favorites.open(browser).catch((err) => console.warn(`  [Favorites] контекст аккаунта не открыт: ${err.message}`));
     for (const monitor of monitors) {
       try {
         await scanMonitor(page, monitor, isFirstRun);
@@ -421,6 +435,7 @@ async function cycle(isFirstRun) {
       }
     }
   } finally {
+    await favorites.close();
     await browser.close();
   }
   await tidyPhotos();

@@ -459,4 +459,17 @@ check('монитор: металл и страна по пути раздела
   assert.strictEqual(matchesMonitor({ metals: ['silver'] }, parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null })), true);
 });
 
+check('избранное ay.by: строка в карточке, выключено без логина', () => {
+  const { buildCaption } = require('./coins');
+  const favorites = require('./coins/favorites');
+  assert.strictEqual(favorites.enabled(), Boolean(process.env.AYBY_LOGIN && process.env.AYBY_PASSWORD));
+  assert.ok(favorites.FAV_BUTTON.test(' В избранное ') && favorites.FAV_BUTTON.test('Добавить в избранное') && !favorites.FAV_BUTTON.test('Избранное'));
+  const mon = { name: 'Монеты (золото)', emoji: '🥇' };
+  const lot = { title: '10 рублей 1899 АГ', price: 2500, saleType: 'buy_now', url: 'https://ay.by/lot/x-1.html', photos: [] };
+  const parsed = parseCoin({ title: lot.title, sectionPath: null });
+  assert.ok(buildCaption(mon, lot, parsed, false, null, { ok: true, note: 'добавлено' }).includes('⭐ Добавлено в избранное ay.by'));
+  assert.ok(buildCaption(mon, lot, parsed, false, null, { ok: false, note: 'сессия слетела' }).includes('⭐ В избранное не добавлено: сессия слетела'));
+  assert.ok(!buildCaption(mon, lot, parsed, false, null, null).includes('⭐'));
+});
+
 console.log(`\nпроверок пройдено: ${passed}`);

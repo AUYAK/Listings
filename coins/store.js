@@ -120,6 +120,10 @@ async function markNotified(listingId) {
   await pool.query('UPDATE listings.coin_lots SET notified_at = NOW() WHERE listing_id = $1', [listingId]);
 }
 
+async function markFavorited(listingId) {
+  await pool.query('UPDATE listings.coin_lots SET favorited_at = NOW() WHERE listing_id = $1', [listingId]);
+}
+
 // Аукционы, у которых до конца осталось не больше hours часов, уведомление ещё не уходило
 async function lotsClosingSoon(monitorKey, hours, limit) {
   const res = await pool.query(
@@ -284,7 +288,7 @@ async function rebuildCatalogFromSales(source, years, rate, minSamples = 2) {
 }
 
 module.exports = {
-  upsertCard, saveLotDetails, recordOutcome, touchEndsAt, markNotified, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
+  upsertCard, saveLotDetails, recordOutcome, touchEndsAt, markNotified, markFavorited, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
   lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles,
   getLot, getCoinRows, upsertKufarLot, saveEstimate,
   getCatalog, getCatalogs, catalogKeys, upsertCoinType, upsertSales, rebuildCatalogFromSales, CATALOG_FACTOR,

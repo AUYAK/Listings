@@ -1,0 +1,15 @@
+const fs = require('fs');
+let s = fs.readFileSync('coins/parse.js', 'utf8');
+const startbid = fs.readFileSync('./startbid.txt', 'utf8');
+const setflag = fs.readFileSync('./setflag.txt', 'utf8');
+const a = 'function denominationFrom(title) {\n';
+if (!s.includes(a)) throw new Error('anchor a');
+s = s.replace(a, () => startbid + a);
+const b = "  const t = (title || '').toLowerCase().replace(/ё/g, 'е');\n  // дробные";
+if (!s.includes(b)) throw new Error('anchor b');
+s = s.replace(b, () => "  const t = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е'));\n  // дробные");
+const lines = s.split('\n');
+const i = lines.findIndex((l) => l.includes("['несколько монет',"));
+if (i < 0) throw new Error('anchor c');
+lines[i] = setflag.trimEnd();
+fs.writeFileSync('coins/parse.js', lines.join('\n'));

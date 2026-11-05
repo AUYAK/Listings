@@ -3,3 +3,4 @@ node_modules/
 coin-photos/
 debug/
 *.log
+ayby-session.json
