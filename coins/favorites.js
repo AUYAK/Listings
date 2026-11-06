@@ -6,7 +6,7 @@
 // Аккаунт живёт в отдельном контексте браузера, чтобы сканирование сотен страниц шло анонимно и не
 // связывалось с учётной записью.
 // Проверка результата — не по кнопке, а по странице «Избранное»: там должен появиться id лота.
-// Отладка на сервере: node debug-favorite.js <url лота>
+// Проверка сессии на сервере: node ayby-login.js --check
 
 const fs = require('fs');
 const path = require('path');
@@ -153,7 +153,7 @@ async function hasFavorite(page, lotId) {
   return false;
 }
 
-// Добавление через запрос, который шлёт сама кнопка «В избранное» (подсмотрен в debug-favorite.js):
+// Добавление через запрос, который шлёт сама кнопка «В избранное» (так делает кнопка на странице лота):
 // GET favorite_lists.phtml?action=element_insert&ajax=1&element_id=<id>&type=auction — с cookies аккаунта
 async function insertFavorite(page, lotId, lotUrl) {
   const url = `${FAVORITES_URL}?action=element_insert&ajax=1&element_id=${lotId}&type=auction`;

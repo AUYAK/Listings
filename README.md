@@ -30,7 +30,7 @@
 - `load-catalog.js` — загрузка проходов gdenashel (`--only zoloto`, `--rebuild-only`).
 - `coin-funnel.js` — почему лоты не попали в уведомления (`--days 7`).
 - `ayby-login.js` — вход в ay.by без пароля в `.env`: `--cdp 9222` (через обычный Chrome), `--import cookies.txt`.
-- `debug-list.js`, `debug-lot.js`, `debug-favorite.js`, `debug-bid.js` — проверка страниц ay.by на сервере.
+- `debug-list.js`, `debug-lot.js`, `debug-bid.js` — проверка страниц ay.by на сервере.
 - `test-coins.js` — `npm test`.
 - `migrations/` — применять от `lo_admin` по порядку; все идемпотентны.
 
@@ -60,7 +60,7 @@ node ayby-login.js --cdp 9222 --now
 ```
 
 Получится `ayby-session.json` (cookies ay.by и ник) — его копируют на сервер. Когда сессия протухнет,
-бот напишет «сессия ay.by не активна», процедуру повторить. Проверка: `node debug-favorite.js <url лота> --no-click`,
+бот напишет «сессия ay.by не активна», процедуру повторить. Проверка сессии: `node ayby-login.js --check`,
 сухой прогон ставки: `node debug-bid.js <url лота> --amount <минимальная ставка>` (без `--confirm` не ставит).
 
 ## Ставки из Telegram

@@ -163,7 +163,12 @@ async function viaWindow() {
 }
 
 (async () => {
-  if (argAfter('--cdp')) await viaCdp(parseInt(argAfter('--cdp'), 10));
+  if (args.includes('--check')) { // жива ли сохранённая сессия (на сервере — headless)
+    if (!fav.hasSession()) { console.error(`файла сессии нет: ${fav.SESSION_FILE}`); process.exit(1); }
+    console.log(`файл сессии: ${path.resolve(fav.SESSION_FILE)}, ник ${fav.savedNick() || 'не записан'}`);
+    if (!(await verifySaved())) process.exitCode = 1;
+  }
+  else if (argAfter('--cdp')) await viaCdp(parseInt(argAfter('--cdp'), 10));
   else if (argAfter('--import')) await viaImport(argAfter('--import'));
   else await viaWindow();
 })().catch((err) => { console.error(`ошибка: ${err.message}`); process.exit(1); });
