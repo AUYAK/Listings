@@ -62,16 +62,24 @@ function dump(name, html) {
     console.log(`  в избранном до нажатия: ${inFav}`);
     if (noClick) return;
 
-    // 3. нажатие и сетевые запросы
-    console.log('\n== нажимаем «В избранное»');
-    const reqs = [];
-    page.on('request', (r) => { if (!/\.(png|jpg|jpeg|gif|css|js|woff2?|svg)(\?|$)/i.test(r.url()) && !/google|yandex|facebook|gstatic/.test(r.url())) reqs.push(`${r.method()} ${r.url()}${r.method() === 'POST' ? ` body=${(r.postData() || '').slice(0, 200)}` : ''}`); });
-    const r = await fav.clickFavorite(page, url);
-    console.log(`  ${JSON.stringify(r)}`);
-    for (const q of reqs) console.log(`   → ${q}`);
+    // 3. добавление тем же запросом, что шлёт кнопка, и проверка по странице избранного
+    console.log('\n== добавляем запросом element_insert');
+    const ins = await fav.insertFavorite(page, lotId, url);
+    console.log(`  HTTP ${ins.status} ${ins.url}\n  ответ: ${ins.body || '(пусто)'}`);
     const after = await fav.hasFavorite(page, lotId);
-    console.log(`  в избранном после нажатия: ${after}`);
-    if (!after) dump('favorites', await page.content());
+    console.log(`  в избранном после добавления: ${after}`);
+    if (!after) {
+      await page.goto(fav.FAVORITES_URL, { waitUntil: 'domcontentloaded' });
+      const html = await page.content();
+      const links = [...new Set(html.match(/https?:\/\/ay\.by\/[^"'\s<>]*(?:favorite|lot\/)[^"'\s<>]*/g) || [])].slice(0, 25);
+      console.log(`  страница избранного: title «${await page.title()}», ссылок про избранное/лоты: ${links.length}`);
+      for (const l of links) console.log(`   ${l.replace(/&amp;/g, '&')}`);
+      console.log(`  id ${lotId} в HTML страницы: ${html.includes(lotId)}`);
+      dump('favorites', html);
+      console.log('\n== для сравнения нажимаем кнопку на странице лота');
+      console.log(`  ${JSON.stringify(await fav.clickFavorite(page, url))}`);
+      console.log(`  в избранном после кнопки: ${await fav.hasFavorite(page, lotId)}`);
+    }
     await context.storageState({ path: fav.SESSION_FILE });
   } catch (err) {
     console.error(`ошибка: ${err.message}`);

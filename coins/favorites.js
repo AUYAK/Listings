@@ -91,12 +91,31 @@ async function ensureLoggedIn(page) {
   loggedIn = true;
 }
 
-// Лот в избранном? Страница избранного содержит ссылки на лоты с их числовым id
+// Лот в избранном? Ищем id лота на странице избранного (ссылка на лот, element_id в ссылке удаления)
+// и на страницах списков, на которые она ссылается.
+const idInHtml = (html, lotId) => html.includes(`-${lotId}.html`) || new RegExp(`(?:element_id|lot_id|lot|id)[=/:-]${lotId}(?!\\d)`).test(html);
 async function hasFavorite(page, lotId) {
   await page.goto(FAVORITES_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
   await assertNotVerification(page);
   const html = await page.content();
-  return html.includes(`-${lotId}.html`) || new RegExp(`lot[_/=-]?id\\D{0,5}${lotId}(?!\\d)`).test(html);
+  if (idInHtml(html, lotId)) return true;
+  // списки избранного: favorite_lists.phtml?list_id=… / ?id=… — первые несколько
+  const lists = [...new Set((html.match(/https?:\/\/ay\.by\/personal\/favorite_lists\.phtml\?[^"'\s<>]+/g) || [])
+    .filter((u) => !/action=/.test(u)).map((u) => u.replace(/&amp;/g, '&')))].slice(0, 5);
+  for (const url of lists) {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    if (idInHtml(await page.content(), lotId)) return true;
+  }
+  return false;
+}
+
+// Добавление через запрос, который шлёт сама кнопка «В избранное» (подсмотрен в debug-favorite.js):
+// GET favorite_lists.phtml?action=element_insert&ajax=1&element_id=<id>&type=auction — с cookies аккаунта
+async function insertFavorite(page, lotId, lotUrl) {
+  const url = `${FAVORITES_URL}?action=element_insert&ajax=1&element_id=${lotId}&type=auction`;
+  const resp = await page.request.get(url, { headers: { Referer: lotUrl || 'https://ay.by/', 'X-Requested-With': 'XMLHttpRequest' }, timeout: NAV_TIMEOUT });
+  const body = (await resp.text().catch(() => '')).replace(/\s+/g, ' ').trim();
+  return { status: resp.status(), url: resp.url(), body: body.slice(0, 300) };
 }
 
 // Кнопка «В избранное» на странице лота: нажать и вернуть её текст после нажатия
@@ -124,11 +143,15 @@ async function add(lotUrl, lotId) {
   try {
     await ensureLoggedIn(page);
     if (await hasFavorite(page, lotId)) return { ok: true, note: 'уже в избранном' };
+    const ins = await insertFavorite(page, lotId, lotUrl);
+    if (/login\.phtml/.test(ins.url)) { loggedIn = false; return { ok: false, note: 'сессия слетела, перенаправило на вход' }; }
+    if (ins.status >= 400) return { ok: false, note: `запрос добавления вернул HTTP ${ins.status}` };
+    if (await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено' }; }
+    // запрос прошёл, но в списке не видим: пробуем через кнопку на странице лота
     const r = await clickFavorite(page, lotUrl);
-    if (!r.clicked && !r.already) return { ok: false, note: 'кнопка «В избранное» не найдена' };
-    if (/login\.phtml/.test(r.url || '')) { loggedIn = false; return { ok: false, note: 'сессия слетела, перенаправило на вход' }; }
-    if (await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: r.after && r.after !== r.before ? `кнопка: «${r.after}»` : 'добавлено' }; }
-    return { ok: false, note: `нажали «${r.before}», но в списке избранного лота нет (после нажатия: «${r.after}»)` };
+    if (r.clicked && await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено (через кнопку)' }; }
+    if (ins.status === 200 && !/ошибк|error|войти|login/i.test(ins.body)) return { ok: true, note: `запрос принят (HTTP 200), в списке не нашли: ${ins.body.slice(0, 80) || 'пустой ответ'}` };
+    return { ok: false, note: `HTTP ${ins.status}: ${ins.body.slice(0, 120) || 'пустой ответ'}` };
   } catch (err) {
     if (/вход не удался|verification/i.test(err.message)) loggedIn = false;
     return { ok: false, note: err.message };
@@ -146,6 +169,6 @@ async function newPage() {
 }
 
 module.exports = {
-  enabled, hasCredentials, hasSession, open, close, add, login, isLoggedIn, hasFavorite, clickFavorite, ensureLoggedIn, newPage, saveSession,
+  enabled, hasCredentials, hasSession, open, close, add, login, isLoggedIn, hasFavorite, insertFavorite, clickFavorite, ensureLoggedIn, newPage, saveSession,
   assertNotVerification, FAV_BUTTON, SESSION_FILE, LOGIN_URL, FAVORITES_URL, LOGIN, USER_AGENT, RELOGIN_HINT,
 };
