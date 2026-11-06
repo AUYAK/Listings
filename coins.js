@@ -248,7 +248,7 @@ async function scanMonitor(page, monitor, isFirstRun) {
       const url = p === 1 ? section : `${section}${section.includes('?') ? '&' : '?'}page=${p}`; // сквозные разделы — topic.phtml?f=1&ti1=6
       let cards;
       try { cards = await ayby.scanListPage(page, url); ok(); } catch (err) { console.warn(`  [Scan] ${url}: ${err.message}`); failed(err); break; }
-      if (!cards.length) { if (p === 1) console.warn(`  [Scan] ${url}: карточек нет — раздел пуст или другая разметка (проверить: node debug-list.js "${url}")`); break; }
+      if (!cards.length) { if (p === 1) console.warn(`  [Scan] ${url}: карточек нет — раздел пуст или другая разметка (проверить: node debug-ayby.js "${url}")`); break; }
       for (const card of cards) {
         seen++;
         const { listingId } = await store.saveListing(monitor.key, listingFromCard(card));

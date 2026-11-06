@@ -210,7 +210,7 @@ async function rawPage() {
   return context.newPage();
 }
 
-// Страница в контексте аккаунта (для снайп-ставок: sniper.js, debug-bid.js); вход выполняется при необходимости
+// Страница в контексте аккаунта (для снайп-ставок: sniper.js, debug-ayby.js); вход выполняется при необходимости
 async function newPage() {
   const page = await rawPage();
   try { await ensureLoggedIn(page); } catch (err) { await page.close().catch(() => {}); throw err; }

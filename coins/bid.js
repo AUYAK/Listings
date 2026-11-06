@@ -3,7 +3,7 @@
 // ay.by работает по системе максимальных ставок без продления торгов: мы вводим свой максимум, площадка
 // сама держит цену на шаг выше чужой. Поэтому ставка один раз, за SNIPE_SECONDS до конца, на весь максимум.
 // Форма лота: поле суммы (предзаполнено минимальной ценой) → «Сделать ставку» → «Я согласен с правилами…
-// Это моя максимальная ставка.» → «Да, сделать ставку». Проверка разметки на сервере: node debug-bid.js <url>
+// Это моя максимальная ставка.» → «Да, сделать ставку». Проверка на сервере: node debug-ayby.js <url лота> --bid <мин. ставка>
 
 const { assertNotVerification } = require('./favorites');
 const { parsePrice } = require('./ayby');
@@ -85,7 +85,7 @@ async function openLot(page, url) {
 // Ставка: заполнить сумму, «Сделать ставку», (пауза beforeConfirm — ждём момента), «Да, сделать ставку».
 // confirm=false — только открыть подтверждение и вернуть его текст (отладка).
 async function placeBid(page, amount, { confirm = true, beforeConfirm = null } = {}) {
-  // Разметка ay.by (см. debug-bid.js): form#lot-rate-form → input#lot-input[name=cost] (data-min — минимальная
+  // Разметка ay.by (проверено 2026-11-06): form#lot-rate-form → input#lot-input[name=cost] (data-min — минимальная
   // ставка), кнопка «Сделать ставку» button.show-popup, подтверждение «Да, сделать ставку» button[data-form="#lot-rate-form"]
   const control = page.locator('.b-lot-control');
   let input = page.locator('#lot-input, .b-lot-control input[name="cost"]').first();

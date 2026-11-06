@@ -7,6 +7,7 @@ const { parseCoin } = require('./coins/parse');
 const cstore = require('./coins/store');
 const cmarket = require('./coins/market');
 const numista = require('./coins/numista');
+const tg = require('./telegram');
 const { metalValueLive } = require('./coins/metal');
 
 // Мониторы с domain='coins' (Kufar): каждое объявление разбирается и сохраняется в coin_lots,
@@ -33,25 +34,9 @@ async function assessCoinListing(listingId, listing) {
 }
 
 const INTERVAL_MS = parseInt(process.env.CHECK_INTERVAL_MS || '60000', 10);
-const { TELEGRAM_BOT_TOKEN } = process.env;
-const DEFAULT_CHAT_IDS = (process.env.TELEGRAM_CHAT_IDS || process.env.TELEGRAM_CHAT_ID || '')
-  .split(',').map((id) => id.trim()).filter(Boolean);
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
-
-async function telegramRequest(method, body) {
-  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!data.ok) {
-    console.warn(`[Telegram] ${method} failed: ${data.description}`);
-  }
-  return data;
-}
 
 function formatPrice(byn, usd) {
   return [byn ? `${Number(byn).toLocaleString('ru')} р.` : null, usd ? `${Number(usd).toLocaleString('ru')} $` : null]
@@ -89,24 +74,6 @@ function buildPriceHistoryLines(history) {
   return lines;
 }
 
-// Who gets notifications for a monitor:
-//  - chats that opened bot settings (/settings) — only if they ticked this category;
-//  - chats that never opened settings — legacy config (monitor.chatIds or TELEGRAM_CHAT_IDS).
-async function resolveRecipients(monitor) {
-  const legacy = monitor.optIn ? [] : (monitor.chatIds && monitor.chatIds.length ? monitor.chatIds : DEFAULT_CHAT_IDS);
-  try {
-    const [subscribers, configured] = await Promise.all([
-      store.getSubscribers(monitor.key),
-      store.getConfiguredChats(),
-    ]);
-    const legacyOnly = legacy.filter((id) => !configured.has(String(id)));
-    return [...new Set([...subscribers, ...legacyOnly].map(String))];
-  } catch (err) {
-    console.warn(`[Telegram] Could not load subscriptions (${err.message}), using config recipients`);
-    return legacy;
-  }
-}
-
 async function notify(listing, monitor, isUpdate = false, prev = null, listingId = null, recipientIds = null) {
   const listingUrl = listing.url || monitor.url;
   const label = isUpdate ? '🔄 Обновление' : 'Kufar.by';
@@ -122,8 +89,8 @@ async function notify(listing, monitor, isUpdate = false, prev = null, listingId
     }
   }
 
-  const targets = recipientIds || await resolveRecipients(monitor);
-  if (!TELEGRAM_BOT_TOKEN || !targets || targets.length === 0) {
+  const targets = recipientIds || await tg.resolveRecipients(monitor);
+  if (!tg.isConfigured() || !targets || targets.length === 0) {
     console.log('[Telegram] Not configured.');
     return;
   }
@@ -140,52 +107,7 @@ async function notify(listing, monitor, isUpdate = false, prev = null, listingId
     `<a href="${listingUrl}">Открыть объявление</a>`;
 
   for (const chatId of targets) {
-    const photos = listing.photos || [];
-    let sentMsgId = null;
-
-    if (photos.length >= 2) {
-      const media = photos.map((url, i) => ({
-        type: 'photo',
-        media: url,
-        ...(i === 0 ? { caption, parse_mode: 'HTML' } : {}),
-      }));
-      const res = await telegramRequest('sendMediaGroup', { chat_id: chatId, media });
-      if (res.ok) {
-        sentMsgId = res.result?.[0]?.message_id;
-      } else {
-        console.warn(`[Telegram] sendMediaGroup failed for ${chatId}: ${res.description}`);
-      }
-    }
-
-    // try single photo (first) as fallback or primary
-    if (!sentMsgId && photos.length >= 1) {
-      const res = await telegramRequest('sendPhoto', {
-        chat_id: chatId,
-        photo: photos[0],
-        caption,
-        parse_mode: 'HTML',
-      });
-      if (res.ok) {
-        sentMsgId = res.result?.message_id;
-      } else {
-        console.warn(`[Telegram] sendPhoto failed for ${chatId}: ${res.description}`);
-      }
-    }
-
-    if (!sentMsgId) {
-      const res = await telegramRequest('sendMessage', {
-        chat_id: chatId,
-        text: caption,
-        parse_mode: 'HTML',
-        disable_web_page_preview: false,
-      });
-      if (res.ok) {
-        sentMsgId = res.result?.message_id;
-      } else {
-        console.error(`[Telegram] sendMessage error for ${chatId}: ${res.description}`);
-      }
-    }
-
+    const sentMsgId = await tg.sendCard(chatId, caption, listing.photos || []);
     if (listingId && sentMsgId) {
       await store.saveNotification(listingId, chatId, sentMsgId).catch(() => {});
     }
@@ -463,8 +385,8 @@ async function tick(isFirstRun) {
 }
 
 async function main() {
-  if (!TELEGRAM_BOT_TOKEN || DEFAULT_CHAT_IDS.length === 0) {
-    console.warn('Warning: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_IDS not set (only monitors with their own chatIds will notify)');
+  if (!tg.isConfigured()) {
+    console.warn('Warning: TELEGRAM_BOT_TOKEN not set — notifications are off');
   }
   console.log(`Kufar monitor started. Monitors: ${MONITORS.map((m) => m.name).join(', ')}. Interval: ${INTERVAL_MS / 1000}s`);
 
