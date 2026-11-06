@@ -10,6 +10,8 @@
 //       (или chrome.exe), войти в ay.by в этом окне, затем запустить скрипт. После — окно можно закрыть.
 //   node ayby-login.js
 //       Открывает своё окно браузера на странице входа; подходит для входа по логину/паролю (не Google).
+//   node ayby-login.js --check
+//       Жива ли сохранённая сессия (headless, для сервера).
 //   node ayby-login.js --import cookies.txt
 //       Импорт cookies ay.by, выгруженных расширением вроде «Get cookies.txt LOCALLY» (формат Netscape),
 //       либо строкой из DevTools: --import "PHPSESSID=…; other=…"
