@@ -85,8 +85,13 @@ async function viaCdp(port) {
   const context = browser.contexts()[0];
   if (!context) { console.error('в браузере нет открытых окон'); process.exitCode = 1; return; }
   try {
-    const ok = await waitForLogin(context);
-    if (!ok) { console.error('вход не замечен, файл сессии не изменён'); process.exitCode = 1; return; }
+    if (args.includes('--now')) {
+      // уже вошли: не ждём, просто забираем cookies
+      console.log(`подключились, вкладок: ${context.pages().length}; забираем cookies`);
+    } else {
+      const ok = await waitForLogin(context);
+      if (!ok) { console.error('вход не замечен, файл сессии не изменён'); process.exitCode = 1; return; }
+    }
     await saveState(context);
   } finally {
     await browser.close().catch(() => {}); // отключаемся; само окно браузера остаётся, его можно закрыть
