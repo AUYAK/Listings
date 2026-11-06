@@ -7,7 +7,9 @@ const NAV_TIMEOUT = parseInt(process.env.COINS_NAV_TIMEOUT_MS || '30000', 10);
 
 // ay.by иногда отдаёт вместо страницы JS-заглушку «Verification» (проверка на бота). Разбирать её нельзя:
 // получится пустой лот с «истёкшим» таймером. Бросаем ошибку с «HTTP 403», чтобы циклы coins.js остановились.
+// В обычном браузере заглушка сама переходит на запрошенную страницу за несколько секунд — ждём до 10 с.
 async function assertNotVerification(page) {
+  for (let i = 0; i < 10 && (await page.title().catch(() => '')) === 'Verification'; i++) await new Promise((r) => setTimeout(r, 1000));
   if ((await page.title().catch(() => '')) === 'Verification') throw new Error('HTTP 403: ay.by verification page (bot check)');
 }
 

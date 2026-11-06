@@ -1,13 +1,15 @@
 {
-  "name": "kufar-monitor",
+  "name": "listings",
   "version": "1.0.0",
-  "description": "Kufar.by and ay.by monitor (silver coins) with Telegram notifications",
+  "description": "Kufar.by and ay.by monitor (silver and gold coins) with Telegram notifications, ay.by favorites and snipe bids",
   "main": "listings.js",
   "type": "commonjs",
   "scripts": {
     "start": "node listings.js",
-    "test": "node test-coins.js",
-    "coins": "node coins.js"
+    "coins": "node coins.js",
+    "poll": "node poll.js",
+    "sniper": "node sniper.js",
+    "test": "node test-coins.js"
   },
   "dependencies": {
     "dotenv": "^17.0.0",

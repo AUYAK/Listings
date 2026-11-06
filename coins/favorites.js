@@ -30,7 +30,10 @@ const log = (msg) => console.log(`  [Favorites] ${msg}`);
 let context = null; // контекст аккаунта на время цикла
 let loggedIn = false;
 
+// Страница «Verification» (проверка на бота) в обычном браузере сама переходит на запрошенную страницу
+// за несколько секунд — ждём до 10 с, и только потом считаем, что нас не пускают
 async function assertNotVerification(page) {
+  for (let i = 0; i < 10 && (await page.title().catch(() => '')) === 'Verification'; i++) await pause(1000);
   if ((await page.title().catch(() => '')) === 'Verification') throw new Error('HTTP 403: ay.by verification page (bot check)');
 }
 
