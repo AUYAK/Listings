@@ -14,7 +14,7 @@ const POLL_MS = parseInt(process.env.SNIPE_POLL_MS || '15000', 10);
 const LEAD_MIN = parseInt(process.env.SNIPE_LEAD_MIN || '6', 10);      // за сколько минут брать заявку в работу
 const SNIPE = bid.SNIPE_SECONDS;                                        // за сколько секунд до конца подтверждать ставку
 const PREP = SNIPE + 25;                                                // за сколько секунд открыть подтверждение
-const NICK = (process.env.AYBY_NICK || '').trim();
+const NICK = (process.env.AYBY_NICK || favorites.savedNick() || '').trim(); // из .env или из файла сессии (ayby-login.js)
 const ts = () => new Date().toLocaleString('ru-BY');
 const log = (msg) => console.log(`[${ts()}] [Sniper] ${msg}`);
 

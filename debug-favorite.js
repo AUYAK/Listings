@@ -25,8 +25,7 @@ function dump(name, html) {
 (async () => {
   const browser = await chromium.launch({ headless: true });
   await fav.open(browser);
-  const context = browser.contexts()[0];
-  const page = await context.newPage();
+  const page = await fav.rawPage();
   try {
     // 1. вход
     console.log('\n== вход');
@@ -80,7 +79,7 @@ function dump(name, html) {
       console.log(`  ${JSON.stringify(await fav.clickFavorite(page, url))}`);
       console.log(`  в избранном после кнопки: ${await fav.hasFavorite(page, lotId)}`);
     }
-    await context.storageState({ path: fav.SESSION_FILE });
+    await fav.saveSession();
   } catch (err) {
     console.error(`ошибка: ${err.message}`);
     dump('error', await page.content().catch(() => ''));

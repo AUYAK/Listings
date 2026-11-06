@@ -40,8 +40,10 @@ async function readLotState(page) {
     out.priceText = null;
     for (let i = 0; i < mains.length; i++) { const t = text(mains[i]); if (t && /\d/.test(t) && /руб/.test(t)) { out.priceText = t; break; } }
     const body = (document.body.innerText || '').replace(/\s+/g, ' ');
-    out.minText = (body.match(/Минимальная цена\s*([\d\s.,]+)\s*бел/) || [null, null])[1];
-    out.reserveNotMet = /Минимальная цена не пройдена/.test(body);
+    // минимальная ставка: data-min поля суммы (#lot-input), запасной вариант — текст «Минимальная цена N бел. руб.»
+    const lotInput = document.querySelector('#lot-input, .b-lot-control input[name="cost"]');
+    out.minText = (lotInput && lotInput.getAttribute('data-min')) || (body.match(/Минимальная цена\s*([\d\s.,]+)\s*бел/) || [null, null])[1];
+    out.reserveNotMet = /Минимальная цена не пройдена/.test(body); // резерв продавца не достигнут
     out.hasBidButton = /Сделать ставку/.test(out.controlText);
     out.soldText = (body.match(/Лот продан за\s*[\d\s.,]+\s*бел\.?\s*руб\.?[^.]{0,120}/) || [null])[0];
     out.unsoldText = (body.match(/(?:Лот не продан|Торги завершены без ставок|Лот снят с торгов|Лот отменён|Лот отменен)[^.]{0,60}/) || [null])[0];
@@ -83,16 +85,24 @@ async function openLot(page, url) {
 // Ставка: заполнить сумму, «Сделать ставку», (пауза beforeConfirm — ждём момента), «Да, сделать ставку».
 // confirm=false — только открыть подтверждение и вернуть его текст (отладка).
 async function placeBid(page, amount, { confirm = true, beforeConfirm = null } = {}) {
+  // Разметка ay.by (см. debug-bid.js): form#lot-rate-form → input#lot-input[name=cost] (data-min — минимальная
+  // ставка), кнопка «Сделать ставку» button.show-popup, подтверждение «Да, сделать ставку» button[data-form="#lot-rate-form"]
   const control = page.locator('.b-lot-control');
-  const input = control.locator('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])').first();
+  let input = page.locator('#lot-input, .b-lot-control input[name="cost"]').first();
+  if (!(await input.count())) input = control.locator('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="submit"]):not([type="button"])').first();
   if (!(await input.count())) throw new Error('поле суммы ставки не найдено в .b-lot-control');
-  const value = Number(amount).toFixed(2).replace('.', ',');
+  const min = parseFloat(await input.getAttribute('data-min').catch(() => '') || '0') || 0;
+  if (min && amount < min) throw new Error(`сумма ${amount} ниже минимальной ставки ${min}`);
+  const value = Number.isInteger(Number(amount)) ? String(amount) : Number(amount).toFixed(2).replace('.', ',');
   await input.fill(value);
-  let btn = control.getByText(BID_BUTTON).first();
+  await input.dispatchEvent('change').catch(() => {});
+  let btn = control.locator('button.show-popup').first();
+  if (!(await btn.count())) btn = control.getByText(BID_BUTTON).first();
   if (!(await btn.count())) btn = page.getByText(BID_BUTTON).first();
   if (!(await btn.count())) throw new Error('кнопка «Сделать ставку» не найдена');
   await btn.click({ timeout: 10000 });
-  const yes = page.getByText(CONFIRM_BUTTON).first();
+  let yes = page.locator('button[data-form="#lot-rate-form"]').first();
+  if (!(await yes.count())) yes = page.getByText(CONFIRM_BUTTON).first();
   await yes.waitFor({ timeout: 10000 });
   const consent = (await page.getByText(/Я согласен с правилами/).first().innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
   // если в подтверждении есть чекбокс согласия — отметить

@@ -35,8 +35,12 @@ function onlyAyby(state) {
 async function saveState(context) {
   const state = onlyAyby(await context.storageState());
   if (!state.cookies.length) throw new Error('cookies ay.by не найдены — вход не выполнен?');
-  fs.writeFileSync(fav.SESSION_FILE, JSON.stringify(state, null, 2));
-  console.log(`сессия сохранена: ${path.resolve(fav.SESSION_FILE)} (${state.cookies.length} cookies)`);
+  // ник аккаунта (заголовок кабинета) — чтобы снайпер узнавал нас в «победитель …»
+  let nick = null;
+  const p = await context.newPage().catch(() => null);
+  if (p) { nick = await fav.accountNick(p).catch(() => null); await p.close().catch(() => {}); }
+  fs.writeFileSync(fav.SESSION_FILE, JSON.stringify({ nick, ...state }, null, 2));
+  console.log(`сессия сохранена: ${path.resolve(fav.SESSION_FILE)} (${state.cookies.length} cookies, ник ${nick || 'не определён'})`);
 }
 
 // Проверка файла сессии отдельным headless-браузером
@@ -57,15 +61,21 @@ async function verifySaved() {
 async function waitForLogin(context) {
   const deadline = Date.now() + WAIT_MIN * 60000;
   console.log(`Войдите в ay.by в окне браузера (жду до ${WAIT_MIN} мин). Галочка «Запомнить меня» продлит сессию.`);
+  let failures = 0;
   while (Date.now() < deadline) {
     await pause(3000);
-    const check = await context.newPage();
+    let check;
     try {
+      check = await context.newPage();
       if (await fav.isLoggedIn(check)) return true;
+      failures = 0;
     } catch (err) {
+      if (/Target closed|browser has been closed|Failed to open a new tab|Protocol error/i.test(err.message) && ++failures >= 3) {
+        throw new Error('окно браузера закрыто — не закрывайте его, пока скрипт не напишет «сессия сохранена»');
+      }
       console.log(`  ${err.message}`);
     } finally {
-      await check.close().catch(() => {});
+      if (check) await check.close().catch(() => {});
     }
   }
   return false;
@@ -73,15 +83,18 @@ async function waitForLogin(context) {
 
 // --cdp: обычный Edge/Chrome с отладочным портом
 async function viaCdp(port) {
-  let browser;
-  try {
-    browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
-  } catch (err) {
-    console.error(`не удалось подключиться к браузеру на порту ${port}: ${err.message}`);
-    console.error(`сначала запустите: Start-Process msedge.exe -ArgumentList '--remote-debugging-port=${port}','--user-data-dir=C:\\ayby-profile','${fav.LOGIN_URL}'`);
-    process.exitCode = 1;
-    return;
+  let browser = null;
+  const until = Date.now() + WAIT_MIN * 60000;
+  console.log(`жду браузер на порту ${port} (до ${WAIT_MIN} мин). Запустите его сами, например:\n  Start-Process chrome.exe -ArgumentList '--remote-debugging-port=${port}','--user-data-dir=C:\\ayby-profile','${fav.LOGIN_URL}'`);
+  while (!browser && Date.now() < until) {
+    try {
+      browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`, { timeout: 5000 });
+    } catch (err) {
+      await pause(3000);
+    }
   }
+  if (!browser) { console.error(`браузер на порту ${port} так и не появился`); process.exitCode = 1; return; }
+  console.log('браузер найден');
   const context = browser.contexts()[0];
   if (!context) { console.error('в браузере нет открытых окон'); process.exitCode = 1; return; }
   try {

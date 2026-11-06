@@ -34,32 +34,70 @@ async function assertNotVerification(page) {
   if ((await page.title().catch(() => '')) === 'Verification') throw new Error('HTTP 403: ay.by verification page (bot check)');
 }
 
+// AYBY_CDP=9222 — вместо своего контекста подключиться к обычному Chrome/Edge, запущенному с
+// --remote-debugging-port (локальная отладка: такой браузер проходит проверку ay.by на бота)
+let cdpBrowser = null;
+
 async function open(browser) {
   if (!enabled() || context) return;
-  const storageState = fs.existsSync(SESSION_FILE) ? SESSION_FILE : undefined;
-  context = await browser.newContext({ userAgent: USER_AGENT, locale: 'ru-BY', storageState });
+  if (process.env.AYBY_CDP) {
+    const { chromium } = require('playwright');
+    cdpBrowser = await chromium.connectOverCDP(`http://127.0.0.1:${process.env.AYBY_CDP}`, { timeout: 5000 });
+    context = cdpBrowser.contexts()[0];
+    if (!context) throw new Error('в браузере на порту AYBY_CDP нет окон');
+    log(`работаем через браузер на порту ${process.env.AYBY_CDP}`);
+  } else {
+    const storageState = fs.existsSync(SESSION_FILE) ? SESSION_FILE : undefined;
+    context = await browser.newContext({ userAgent: USER_AGENT, locale: 'ru-BY', storageState });
+  }
   loggedIn = false;
 }
 
 async function close() {
   if (!context) return;
-  await context.close().catch(() => {});
+  if (cdpBrowser) { await cdpBrowser.close().catch(() => {}); cdpBrowser = null; } // отключаемся, окно остаётся
+  else await context.close().catch(() => {});
   context = null;
   loggedIn = false;
 }
 
+// В файл сессии — только cookies ay.by
 async function saveSession() {
-  if (context) await context.storageState({ path: SESSION_FILE }).catch((err) => log(`сессия не сохранена: ${err.message}`));
+  if (!context) return;
+  try {
+    const state = await context.storageState();
+    fs.writeFileSync(SESSION_FILE, JSON.stringify({
+      nick: savedNick(),
+      cookies: (state.cookies || []).filter((c) => /(^|\.)ay\.by$/.test(c.domain)),
+      origins: (state.origins || []).filter((o) => /ay\.by/.test(o.origin)),
+    }, null, 2));
+  } catch (err) {
+    log(`сессия не сохранена: ${err.message}`);
+  }
 }
 
-// Пользователь вошёл, если страница избранного открывается без формы входа. Без входа ay.by не перенаправляет
-// на login.phtml, а отдаёт форму входа (#loginPopup, поле cl_psw) по тому же адресу — проверяем содержимое.
+// Пользователь вошёл, если страница избранного открывается без отдельной страницы входа. Без входа ay.by
+// не перенаправляет на login.phtml, а отдаёт страницу входа (#auth-layout, заголовок «Беларусь. Минск») по тому же
+// адресу. Скрытый попап входа (#loginPopup, cl_psw) встроен во все страницы — на него смотреть нельзя.
 async function isLoggedIn(page) {
   await page.goto(FAVORITES_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
   await assertNotVerification(page);
   if (/login\.phtml/.test(page.url())) return false;
-  const loginForm = await page.evaluate(() => Boolean(document.querySelector('#loginPopup, #loginForm, input[name="cl_psw"], #auth-layout')));
-  return !loginForm;
+  return !(await page.evaluate(() => Boolean(document.querySelector('#auth-layout'))));
+}
+
+// Ник аккаунта: заголовок личного кабинета https://ay.by/personal/ — это ник (например, «Wolf71»)
+async function accountNick(page) {
+  await page.goto('https://ay.by/personal/', { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  await assertNotVerification(page);
+  if (/login\.phtml/.test(page.url())) return null;
+  const title = (await page.title().catch(() => '')).trim();
+  return title && title.length <= 40 && !/ay\.by|Минск|Беларусь/i.test(title) ? title : null;
+}
+
+// Ник из файла сессии (записывает ayby-login.js / saveSession), если AYBY_NICK не задан
+function savedNick() {
+  try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8')).nick || null; } catch { return null; }
 }
 
 // Форма входа: ищем поле пароля, логин — первое текстовое поле той же формы
@@ -146,15 +184,15 @@ async function add(lotUrl, lotId) {
   try {
     await ensureLoggedIn(page);
     if (await hasFavorite(page, lotId)) return { ok: true, note: 'уже в избранном' };
-    const ins = await insertFavorite(page, lotId, lotUrl);
-    if (/login\.phtml/.test(ins.url)) { loggedIn = false; return { ok: false, note: 'сессия слетела, перенаправило на вход' }; }
-    if (ins.status >= 400) return { ok: false, note: `запрос добавления вернул HTTP ${ins.status}` };
-    if (await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено' }; }
-    // запрос прошёл, но в списке не видим: пробуем через кнопку на странице лота
+    // кнопка на странице лота — основной путь (прямой запрос element_insert защита ay.by отвечает 403)
     const r = await clickFavorite(page, lotUrl);
-    if (r.clicked && await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено (через кнопку)' }; }
-    if (ins.status === 200 && !/ошибк|error|войти|login/i.test(ins.body)) return { ok: true, note: `запрос принят (HTTP 200), в списке не нашли: ${ins.body.slice(0, 80) || 'пустой ответ'}` };
-    return { ok: false, note: `HTTP ${ins.status}: ${ins.body.slice(0, 120) || 'пустой ответ'}` };
+    if (/login\.phtml/.test(r.url || '')) { loggedIn = false; return { ok: false, note: 'сессия слетела, перенаправило на вход' }; }
+    if (r.clicked && await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено' }; }
+    if (!r.clicked && r.already) return { ok: true, note: 'уже в избранном (по кнопке)' };
+    if (!r.clicked) return { ok: false, note: 'кнопка «В избранное» не найдена' };
+    const ins = await insertFavorite(page, lotId, lotUrl);
+    if (ins.status < 400 && await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено (запросом)' }; }
+    return { ok: false, note: `нажали кнопку, но в списке избранного лота нет (запрос: HTTP ${ins.status})` };
   } catch (err) {
     if (/вход не удался|verification/i.test(err.message)) loggedIn = false;
     return { ok: false, note: err.message };
@@ -163,15 +201,20 @@ async function add(lotUrl, lotId) {
   }
 }
 
+// Страница в контексте аккаунта без проверки входа (отладка)
+async function rawPage() {
+  if (!context) throw new Error('контекст аккаунта не открыт (favorites.open(browser))');
+  return context.newPage();
+}
+
 // Страница в контексте аккаунта (для снайп-ставок: sniper.js, debug-bid.js); вход выполняется при необходимости
 async function newPage() {
-  if (!context) throw new Error('контекст аккаунта не открыт (favorites.open(browser))');
-  const page = await context.newPage();
+  const page = await rawPage();
   try { await ensureLoggedIn(page); } catch (err) { await page.close().catch(() => {}); throw err; }
   return page;
 }
 
 module.exports = {
-  enabled, hasCredentials, hasSession, open, close, add, login, isLoggedIn, hasFavorite, insertFavorite, clickFavorite, ensureLoggedIn, newPage, saveSession,
+  enabled, hasCredentials, hasSession, open, close, add, login, isLoggedIn, accountNick, savedNick, hasFavorite, insertFavorite, clickFavorite, ensureLoggedIn, newPage, rawPage, saveSession,
   assertNotVerification, FAV_BUTTON, SESSION_FILE, LOGIN_URL, FAVORITES_URL, LOGIN, USER_AGENT, RELOGIN_HINT,
 };
