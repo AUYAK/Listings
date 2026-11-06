@@ -52,11 +52,14 @@ async function saveSession() {
   if (context) await context.storageState({ path: SESSION_FILE }).catch((err) => log(`сессия не сохранена: ${err.message}`));
 }
 
-// Пользователь вошёл, если страница избранного открывается без редиректа на вход
+// Пользователь вошёл, если страница избранного открывается без формы входа. Без входа ay.by не перенаправляет
+// на login.phtml, а отдаёт форму входа (#loginPopup, поле cl_psw) по тому же адресу — проверяем содержимое.
 async function isLoggedIn(page) {
   await page.goto(FAVORITES_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
   await assertNotVerification(page);
-  return !/login\.phtml/.test(page.url());
+  if (/login\.phtml/.test(page.url())) return false;
+  const loginForm = await page.evaluate(() => Boolean(document.querySelector('#loginPopup, #loginForm, input[name="cl_psw"], #auth-layout')));
+  return !loginForm;
 }
 
 // Форма входа: ищем поле пароля, логин — первое текстовое поле той же формы
