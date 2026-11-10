@@ -23,20 +23,21 @@ async function saveLotDetails(listingId, lot, parsed) {
        bids = COALESCE($7, bids), bargain = $8, ends_at = COALESCE($9, ends_at),
        seller = COALESCE($10, seller), seller_city = COALESCE($11, seller_city), views = COALESCE($12, views),
        specs = $13, description = $14, parsed = $15, photos = $16,
+       seller_id = COALESCE($17, seller_id), seller_rating = COALESCE($18, seller_rating), reserve = $19,
        detail_fetched_at = NOW(), checked_at = NOW()
      WHERE listing_id = $1`,
     [listingId, lot.categoryPath, lot.saleType, parsed.conditionCode, parsed.grade, lot.price, lot.bids, !!lot.bargain,
       lot.endsAt, lot.seller, lot.sellerCity, lot.views, JSON.stringify(lot.specs || {}), lot.description,
-      JSON.stringify(parsed), JSON.stringify(lot.photos || [])]
+      JSON.stringify(parsed), JSON.stringify(lot.photos || []), lot.sellerId ?? null, lot.sellerRating ?? null, lot.reserve ?? null]
   );
 }
 
-async function recordOutcome(listingId, { outcome, finalPrice, finalBids, statusText, approx = false, endedAt = null }) {
+async function recordOutcome(listingId, { outcome, finalPrice, finalBids, statusText, approx = false, endedAt = null, winner = null, winnerId = null }) {
   await pool.query(
     `UPDATE listings.coin_lots SET outcome = $2, final_price = $3, final_bids = $4, end_status_text = $5, final_approx = $6,
-       ended_at = COALESCE($7, NOW()), checked_at = NOW()
+       ended_at = COALESCE($7, NOW()), winner = COALESCE($8, winner), winner_id = COALESCE($9, winner_id), checked_at = NOW()
      WHERE listing_id = $1`,
-    [listingId, outcome, finalPrice ?? null, finalBids ?? null, statusText ?? null, approx, endedAt ?? null]
+    [listingId, outcome, finalPrice ?? null, finalBids ?? null, statusText ?? null, approx, endedAt ?? null, winner, winnerId]
   );
   await pool.query(`UPDATE listings.listings SET status = 'inactive' WHERE id = $1`, [listingId]);
   await pool.query(`INSERT INTO listings.listing_status_logs (listing_id, status) VALUES ($1, 'inactive')`, [listingId]);
@@ -124,19 +125,78 @@ async function markFavorited(listingId) {
   await pool.query('UPDATE listings.coin_lots SET favorited_at = NOW() WHERE listing_id = $1', [listingId]);
 }
 
-// Аукционы, у которых до конца осталось не больше hours часов, уведомление ещё не уходило
-async function lotsClosingSoon(monitorKey, hours, limit) {
+// Аукционы, у которых до конца осталось не больше hours часов, уведомление ещё не уходило; плюс те, что попали
+// в окно тихих лотов (≤ quietHours) и ещё не проверялись на «тихий лот» — их проверяем один раз
+async function lotsClosingSoon(monitorKey, hours, quietHours, limit) {
   const res = await pool.query(
     `SELECT l.id, l.external_id, l.url, l.title, a.section, a.ends_at, a.sale_type
      FROM listings.coin_lots a JOIN listings.listings l ON l.id = a.listing_id
      WHERE l.monitor_key = $1 AND a.outcome IS NULL AND a.notified_at IS NULL
-       AND a.sale_type = 'auction' AND a.detail_fetched_at IS NOT NULL
-       AND a.ends_at IS NOT NULL AND a.ends_at > NOW() AND a.ends_at <= NOW() + ($2 || ' hours')::interval
+       AND a.sale_type IN ('auction', 'auction_buynow') AND a.detail_fetched_at IS NOT NULL
+       AND a.ends_at IS NOT NULL AND a.ends_at > NOW()
+       AND (a.ends_at <= NOW() + ($2 || ' hours')::interval
+            OR (a.quiet_checked_at IS NULL AND a.ends_at <= NOW() + ($3 || ' hours')::interval))
      ORDER BY a.ends_at ASC
-     LIMIT $3`,
-    [monitorKey, String(hours), limit]
+     LIMIT $4`,
+    [monitorKey, String(hours), String(Math.max(hours, quietHours)), limit]
   );
   return res.rows;
+}
+
+async function markQuietChecked(listingId) {
+  await pool.query('UPDATE listings.coin_lots SET quiet_checked_at = NOW() WHERE listing_id = $1', [listingId]);
+}
+
+// Карточка этого лота ay.by уже ушла от другого монитора (лот ведут и раздел, и страница продавца)
+async function notifiedElsewhere(externalId, monitorKey) {
+  if (!externalId) return false;
+  const res = await pool.query(
+    `SELECT 1 FROM listings.listing_notifications n JOIN listings.listings l ON l.id = n.listing_id
+     WHERE l.external_id = $1 AND l.monitor_key <> $2 LIMIT 1`,
+    [String(externalId), monitorKey]
+  );
+  return res.rowCount > 0;
+}
+
+// Какие мониторы уже ведут лот: external_id → Set(monitor_key). Одним запросом на цикл: свои лоты монитора
+// (новые / известные) и засев нового монитора
+async function knownOwners(monitorKeys) {
+  const owners = new Map();
+  if (!monitorKeys.length) return owners;
+  const res = await pool.query('SELECT external_id, monitor_key FROM listings.listings WHERE monitor_key = ANY($1::text[])', [monitorKeys]);
+  for (const r of res.rows) {
+    if (!owners.has(r.external_id)) owners.set(r.external_id, new Set());
+    owners.get(r.external_id).add(r.monitor_key);
+  }
+  return owners;
+}
+
+// ---- Пользователи ay.by (listings.ayby_users, миграция 015) ----
+
+async function upsertUser({ id, nick = null, rating = null, positive = null, negative = null }, { checked = true } = {}) {
+  if (!id) return;
+  await pool.query(
+    `INSERT INTO listings.ayby_users (user_id, nick, rating, positive, negative, checked_at)
+     VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN NOW() ELSE '-infinity'::timestamptz END)
+     ON CONFLICT (user_id) DO UPDATE SET nick = COALESCE(EXCLUDED.nick, listings.ayby_users.nick),
+       rating = COALESCE(EXCLUDED.rating, listings.ayby_users.rating), positive = COALESCE(EXCLUDED.positive, listings.ayby_users.positive),
+       negative = COALESCE(EXCLUDED.negative, listings.ayby_users.negative),
+       checked_at = CASE WHEN $6 THEN NOW() ELSE listings.ayby_users.checked_at END`,
+    [String(id), nick, rating, positive, negative, checked]
+  );
+}
+
+// Победители торгов, чей профиль не читали maxAgeDays дней (записанные только со страницы лота — checked_at
+// '-infinity' — тоже): сначала дорогие покупки
+async function winnersToRefresh(limit, maxAgeDays = 30) {
+  const res = await pool.query(
+    `SELECT a.winner_id AS id, max(a.final_price) AS top
+     FROM listings.coin_lots a LEFT JOIN listings.ayby_users u ON u.user_id = a.winner_id
+     WHERE a.winner_id IS NOT NULL AND (u.user_id IS NULL OR u.checked_at < NOW() - ($2 || ' days')::interval)
+     GROUP BY a.winner_id ORDER BY top DESC NULLS LAST LIMIT $1`,
+    [limit, String(maxAgeDays)]
+  );
+  return res.rows.map((r) => r.id);
 }
 
 async function getLot(listingId) {
@@ -182,7 +242,7 @@ async function getCoinRows(monitorKey = null) {
 const CATALOG_FACTOR = parseFloat(process.env.COINS_CATALOG_FACTOR || '1'); // поправка к ценам внешних аукционов для нашего рынка
 
 function catalogKeys(parsed) {
-  if (parsed.denomKop == null || !parsed.year) return [];
+  if (parsed.denomKop == null || !parsed.year || parsed.year > 1991) return []; // архивы — только Империя и СССР
   const keys = [];
   if (parsed.mintmaster) keys.push(`${parsed.denomKop}|${parsed.year}|${parsed.mintmaster}`);
   keys.push(`${parsed.denomKop}|${parsed.year}`);
@@ -196,19 +256,22 @@ async function getCatalogs(parsed, factor = CATALOG_FACTOR) {
   const keys = catalogKeys(parsed);
   if (!keys.length) return { catalogs: [], type: null };
   const res = await pool.query(
-    `SELECT DISTINCT ON (source) type_key, source, title, prices, samples, window_years FROM listings.coin_catalog
+    `SELECT DISTINCT ON (source) type_key, source, title, prices, samples, window_years, sold_from, sold_to FROM listings.coin_catalog
      WHERE type_key = ANY($1::text[]) AND prices IS NOT NULL AND prices <> '{}'::jsonb
      ORDER BY source, array_position($1::text[], type_key)`,
     [keys]
   );
   const order = { gdenashel: 0, numista: 1 };
+  // pg отдаёт DATE как полночь по местному времени: toISOString() в Минске дала бы предыдущий день
+  const day = (d) => (!d ? null : d instanceof Date ? `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` : String(d).slice(0, 10));
   const catalogs = res.rows
     .sort((a, b) => (order[a.source] ?? 9) - (order[b.source] ?? 9))
     .map((r) => {
       const prices = {};
       const f = r.source === 'numista' ? 1 : factor;
       for (const [g, v] of Object.entries(r.prices || {})) if (v != null) prices[g] = Math.round(v * f * 100) / 100;
-      return { source: r.source, title: r.title, prices, samples: r.samples || null, typeKey: r.type_key, windowYears: r.window_years, factor: f };
+      const period = r.sold_from && r.sold_to ? { from: day(r.sold_from), to: day(r.sold_to) } : null;
+      return { source: r.source, title: r.title, prices, samples: r.samples || null, typeKey: r.type_key, windowYears: r.window_years, period, factor: f };
     });
   const t = await pool.query(
     `SELECT key, title, mintage, konros, bitkin FROM listings.coin_types WHERE key = ANY($1::text[]) ORDER BY array_position($1::text[], key) LIMIT 1`,
@@ -245,49 +308,67 @@ async function upsertSales(rows) {
   }
 }
 
+// Состояния проходов заново по normalize(grade_raw) — после смены правил (корзины слабов) старые строки
+// пересчитываются здесь, а не миграцией: правило одно, в коде (gdenashel.normalizeGrade). Возвращает число изменённых.
+async function renormalizeSales(source, normalize) {
+  const res = await pool.query('SELECT sale_id, grade_raw, grade FROM listings.coin_sales WHERE source = $1', [source]);
+  const changed = res.rows.map((r) => ({ id: r.sale_id, grade: normalize(r.grade_raw) })).filter((r, i) => r.grade !== res.rows[i].grade);
+  for (let i = 0; i < changed.length; i += 1000) {
+    const part = changed.slice(i, i + 1000);
+    await pool.query(
+      `UPDATE listings.coin_sales s SET grade = u.grade FROM unnest($1::text[], $2::text[]) AS u(id, grade) WHERE s.sale_id = u.id`,
+      [part.map((r) => r.id), part.map((r) => r.grade)]
+    );
+  }
+  return changed.length;
+}
+
 // Пересчёт каталога из проходов: медиана цены по (ключ, состояние) за последние years лет, в BYN по курсу rate.
-// Ключи: и точный вариант (с буквами), и тип целиком. Возвращает число записей каталога.
-async function rebuildCatalogFromSales(source, years, rate, minSamples = 2) {
-  // Проходы, сохранённые до разделения слабов: MS64 и выше — отдельное состояние (см. gdenashel.normalizeGrade)
-  await pool.query(
-    `UPDATE listings.coin_sales SET grade = 'MS64+'
-     WHERE source = $1 AND grade = 'UNC' AND upper(regexp_replace(grade_raw, '\\s', '', 'g')) ~ '^MS(6[4-9]|70)'`,
-    [source]
-  );
+// Ключи: и точный вариант (с буквами), и тип целиком. sold_from/sold_to — даты проходов с ценой (карточка пишет
+// «2023–2025»). normalize — пересчитать состояния проходов перед агрегацией. Возвращает число записей каталога.
+async function rebuildCatalogFromSales(source, years, rate, minSamples = 2, normalize = null) {
+  if (normalize) {
+    const n = await renormalizeSales(source, normalize);
+    if (n) console.log(`[Catalog] состояний проходов пересчитано: ${n}`);
+  }
   const agg = await pool.query(
     `WITH recent AS (
-       SELECT type_key, variant_key, grade, price, title FROM listings.coin_sales
+       SELECT type_key, variant_key, grade, price, title, sold_on FROM listings.coin_sales
        WHERE source = $1 AND price > 0 AND grade IS NOT NULL AND sold_on >= CURRENT_DATE - ($2 || ' years')::interval AND sold_on <= CURRENT_DATE
      ), keyed AS (
-       SELECT type_key AS key, grade, price, title FROM recent
+       SELECT type_key AS key, grade, price, title, sold_on FROM recent
        UNION ALL
-       SELECT variant_key AS key, grade, price, title FROM recent WHERE variant_key IS NOT NULL
+       SELECT variant_key AS key, grade, price, title, sold_on FROM recent WHERE variant_key IS NOT NULL
      )
-     SELECT key, grade, count(*)::int n, percentile_cont(0.5) WITHIN GROUP (ORDER BY price) AS median, min(title) AS title
+     SELECT key, grade, count(*)::int n, percentile_cont(0.5) WITHIN GROUP (ORDER BY price) AS median, min(title) AS title,
+            min(sold_on) AS sold_from, max(sold_on) AS sold_to
      FROM keyed GROUP BY key, grade`,
     [source, String(years)]
   );
   const byKey = new Map();
   for (const r of agg.rows) {
     if (r.n < minSamples) continue;
-    const e = byKey.get(r.key) || { prices: {}, samples: {}, title: r.title };
+    const e = byKey.get(r.key) || { prices: {}, samples: {}, title: r.title, from: null, to: null };
     e.prices[r.grade] = Math.round(parseFloat(r.median) * rate * 100) / 100;
     e.samples[r.grade] = r.n;
+    if (!e.from || r.sold_from < e.from) e.from = r.sold_from;
+    if (!e.to || r.sold_to > e.to) e.to = r.sold_to;
     byKey.set(r.key, e);
   }
   for (const [key, e] of byKey) {
     await pool.query(
-      `INSERT INTO listings.coin_catalog (type_key, source, title, currency, prices, samples, window_years, rate, fetched_at)
-       VALUES ($1, $2, $3, 'BYN', $4, $5, $6, $7, NOW())
+      `INSERT INTO listings.coin_catalog (type_key, source, title, currency, prices, samples, window_years, rate, sold_from, sold_to, fetched_at)
+       VALUES ($1, $2, $3, 'BYN', $4, $5, $6, $7, $8, $9, NOW())
        ON CONFLICT (type_key, source) DO UPDATE SET title = EXCLUDED.title, currency = 'BYN', prices = EXCLUDED.prices,
-         samples = EXCLUDED.samples, window_years = EXCLUDED.window_years, rate = EXCLUDED.rate, fetched_at = NOW()`,
-      [key, source, e.title, JSON.stringify(e.prices), JSON.stringify(e.samples), years, rate]
+         samples = EXCLUDED.samples, window_years = EXCLUDED.window_years, rate = EXCLUDED.rate,
+         sold_from = EXCLUDED.sold_from, sold_to = EXCLUDED.sold_to, fetched_at = NOW()`,
+      [key, source, e.title, JSON.stringify(e.prices), JSON.stringify(e.samples), years, rate, e.from, e.to]
     );
   }
   return byKey.size;
 }
 
-// ---- Снайп-ставки (listings.coin_bids, миграция 015) ----
+// ---- Снайп-ставки (listings.coin_bids, миграция 014) ----
 
 // Лот по сообщению бота в чате. Карточка — альбом из нескольких фото с подряд идущими message_id,
 // а сохранён id первого; ответ на любое фото альбома ведём к ближайшему сохранённому id не позже него.
@@ -368,8 +449,8 @@ async function openBids(chatId) {
 
 module.exports = {
   lotByMessage, setBid, cancelBid, getBid, updateBid, bidsDue, openBids,
-  upsertCard, saveLotDetails, recordOutcome, touchEndsAt, markNotified, markFavorited, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
-  lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles,
+  upsertCard, saveLotDetails, recordOutcome, touchEndsAt, markNotified, markFavorited, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
+  lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles, knownOwners, notifiedElsewhere, upsertUser, winnersToRefresh,
   getLot, getCoinRows, upsertKufarLot, saveEstimate,
-  getCatalog, getCatalogs, catalogKeys, upsertCoinType, upsertSales, rebuildCatalogFromSales, CATALOG_FACTOR,
+  getCatalog, getCatalogs, catalogKeys, upsertCoinType, upsertSales, rebuildCatalogFromSales, renormalizeSales, CATALOG_FACTOR,
 };

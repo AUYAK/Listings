@@ -70,6 +70,247 @@ function yearFrom(title) {
   return m ? parseInt(m[1], 10) : null;
 }
 
+// ---- Германия 1871–1945: марки и пфенниги (номинал не в копейках, отдельный ключ группировки) ----
+const GERMAN_STATES = ['Пруссия', 'Бавария', 'Саксония', 'Вюртемберг', 'Баден', 'Гессен', 'Мекленбург', 'Гамбург', 'Любек', 'Бремен',
+  'Ольденбург', 'Ангальт', 'Брауншвейг', 'Шварцбург', 'Липпе', 'Рейсс', 'Вальдек', 'Саксен-Веймар', 'Саксен-Мейнинген', 'Саксен-Альтенбург', 'Саксен-Кобург'];
+// земля ищется по началу названия («бавар» ловит «Бавария», «Баварский»), составные — целиком
+const stateKey = (s) => (s.includes('-') ? s.toLowerCase() : s.toLowerCase().slice(0, 5));
+const GERMAN_HINT = new RegExp(`герман|рейх|веймар|${GERMAN_STATES.map(stateKey).join('|')}`, 'u');
+const NOT_COIN = /нотгельд|банкнот|(?<!\p{L})бон[аыу]?(?!\p{L})|купюр|облигац|почтов/iu;
+
+// «3 марки 1911 A Пруссия» → { unit: 'марка', value: 3, key: 'M3', mint: 'A', state: 'Пруссия' }.
+// Только 1871–1945 и только если это явно Германия (раздел или земля в заголовке): «1 марка» без этого — почтовая марка.
+function foreignFrom(title, sectionPath, year) {
+  if (!year || year < 1871 || year > 1945) return null;
+  const t = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е'));
+  if (NOT_COIN.test(t)) return null; // нотгельды, банкноты — бумага, не монеты
+  if (!GERMAN_HINT.test(t) && !/германи/i.test(sectionPath || '')) return null;
+  const m = t.match(/(?<![\d\/.,])(\d+(?:[.,]\d+)?|½|1\/2)\s*(рейхс?\s*мар\p{L}*|марк\p{L}*|марок|пфен+и?н?г\p{L}*)/u);
+  if (!m) return null;
+  const value = m[1] === '½' || m[1] === '1/2' ? 0.5 : parseFloat(m[1].replace(',', '.'));
+  if (!(value > 0 && value <= 1000)) return null;
+  const unit = /^пф/.test(m[2]) ? 'пфенниг' : 'марка';
+  // буква двора отдельно после года: «1911 A», «1911A», «1904 А» (кириллица), «1913 г. A», «1926 год. F», «1910 год, " F "»;
+  // «1934 года. Буква F» — по слову «буква»
+  const up = (title || '').toUpperCase();
+  const mm = up.match(/(?<![\p{L}\d])(?:18[7-9]\d|19[0-4]\d)(?:\s*(?:Г\.?|ГОДА?)(?=[\s.,]))?(?:[\s.,]+|[\s.,]*[«"(]\s*)?([ADEFGJАЕ])(?![\p{L}\d])/u)
+    || up.match(/БУКВА\s*[«"]?([ADEFGJАЕ])(?![\p{L}])/u);
+  const mint = mm ? ({ А: 'A', Е: 'E' }[mm[1]] || mm[1]) : null;
+  const state = [...GERMAN_STATES].sort((a, b) => stateKey(b).length - stateKey(a).length).find((s) => t.includes(stateKey(s))) || null;
+  return { unit, value, key: `${unit === 'марка' ? 'M' : 'PF'}${value}`, mint, state };
+}
+
+function foreignLabel(f) {
+  if (!f) return null;
+  const v = String(f.value).replace('.', ',');
+  if (f.unit === 'пфенниг') return `${v} пфеннигов`;
+  const word = f.value === 1 ? 'марка' : f.value < 5 && Number.isInteger(f.value) ? 'марки' : 'марок';
+  return `${v} ${word}`;
+}
+
+// ---- Слабы: фирма и грейд по шкале Шелдона ----
+// Корзины грейда: цена слаба резко растёт с каждым баллом выше MS63 (архив 2022–2025: MS60–62 ≈ сырая UNC,
+// MS63–64 ≈ ×2, MS65+ ≈ ×4–10), поэтому сравнивать можно только внутри своей корзины.
+function slabBucket(scale, num) {
+  if (!Number.isFinite(num) || num < 1 || num > 70) return null;
+  switch (scale) {
+    case 'MS': return num >= 66 ? 'MS66+' : num === 65 ? 'MS65' : num === 64 ? 'MS64' : num === 63 ? 'MS63' : num >= 60 ? 'MS60-62' : null;
+    case 'PF': return num >= 68 ? 'PF68+' : num >= 65 ? 'PF65-67' : num >= 60 ? 'PF60-64' : null;
+    case 'AU': return num >= 50 && num < 60 ? 'AU50-58' : null;
+    case 'XF': return num >= 40 && num < 50 ? 'XF40-45' : null;
+    case 'VF': return num >= 20 && num < 40 ? 'VF20-35' : null;
+    case 'F': return num >= 12 && num < 20 ? 'F12-15' : null;
+    default: return null;
+  }
+}
+// Корзина слаба → сырое состояние, которому она примерно равна по цене (только нижние корзины)
+const SLAB_RAW_EQUIV = { 'MS60-62': 'UNC', 'AU50-58': 'AU', 'XF40-45': 'XF', 'VF20-35': 'VF', 'F12-15': 'F' };
+
+const scaleOf = (s) => {
+  const u = s.toUpperCase().replace(/[МС]/g, (c) => ({ М: 'M', С: 'S' }[c])).replace(/[АХЕР]/g, (c) => ({ А: 'A', Х: 'X', Е: 'E', Р: 'P' }[c]));
+  if (/^M[SC]$/.test(u) || u === 'SP' || u === 'PL') return 'MS'; // PL — «prooflike» из банковских наборов ННР
+  if (u === 'PF' || u === 'PR') return 'PF';
+  if (u === 'EF') return 'XF';
+  return u;
+};
+// «MS-64», «ms 66», «МС64», «AU 58», «PF70», «PR68 ULTRA CAMEO», «MS62BN»
+const GRADE_TOKEN = /(?<![\p{L}\d])([MМ][SСC]|[PР][FR]|SP|PL|[AА]U|[XХ]F|[EЕ]F|VF|F)\s*[-–=:]?\s*(\d{1,2})(?!\d)/iu;
+const SLAB_COMPANIES = [
+  ['NGC', /(?<!\p{L})(?:NGC|HGC|NCG|НГС)(?!\p{L})/iu],
+  ['PCGS', /(?<!\p{L})(?:PCGS|PCGC)(?!\p{L})/iu],
+  ['ННР', /(?<!\p{L})(?:ННР|HHP|NNR)(?!\p{L})/iu],
+  ['RNGA', /(?<!\p{L})(?:RNGA|РНГА)(?!\p{L})/iu],
+  ['CPRC', /(?<!\p{L})CPRC(?!\p{L})/iu],
+  ['NRG', /(?<!\p{L})(?:NRG|НРГ)(?!\p{L})/iu],
+  ['ANACS', /(?<!\p{L})ANACS(?!\p{L})/iu],
+  ['ICG', /(?<!\p{L})ICG(?!\p{L})/iu],
+];
+// «NGC 58», «PCGS 63» — грейд одним числом; но «NGC 15 копеек 1915» — это номинал, не грейд
+const COMPANY_NUMBER = /(?<!\p{L})(?:NGC|HGC|NCG|PCGS|PCGC|ННР|HHP|NNR|RNGA|РНГА|CPRC|NRG|НРГ|ICG)\s*[-–=:]?\s*(\d{2})(?!\d)(?!\s*(?:коп|руб|марк|марок|пфен|цент|долл|франк|крон|шилл|злот|лир|пенн|грош|эре|сантим|пес|тенге|фунт|талер|дукат|гульден|рейх))/iu;
+// «слаб», «в слабе», «мини-слаб», «слабирована» — но не «слабый чекан»
+const SLAB_WORD = /(?<!\p{L})(?:мини-?)?слаб(?:е|ы|а|ах|ом|ов)?(?!\p{L})|слабирова\p{L}*/iu;
+const NOT_SLAB = /вынут\p{L}*\s+из\s+(?:мини-?)?слаба|без\s+слаба|не\s+в\s+(?:мини-?)?слабе|из-под\s+слаба/iu;
+const DETAILS = /(?<![\p{L}])(?:det(?:ails?)?|дет)(?![\p{L}])/iu;
+
+function gradeTokenFrom(text) {
+  const m = (text || '').match(GRADE_TOKEN);
+  if (!m) return null;
+  const scale = scaleOf(m[1]);
+  const num = parseInt(m[2], 10);
+  return { scale, num, grade: `${scale}${num}`, bucket: slabBucket(scale, num) };
+}
+
+// «5 рублей 1902 АР, Николай II. В слабе NGC MS65» → { company: 'NGC', grade: 'MS65', bucket: 'MS65', details: false }.
+// Слаб без грейда («Слаб NGC!») → bucket null: корзины нет, оценивается как сырая монета того же состояния —
+// нижняя оценка (слаб не дешевле сырой). «UNC details» → bucket null, details: не оценивается. «Вынута из слаба» — не слаб.
+// Описание учитывается только при сильном признаке (фирма + числовой грейд): там бывает «можно слабировать».
+function slabFrom(title, description = '') {
+  const t = title || '';
+  const d = description || '';
+  if (NOT_SLAB.test(t)) return null;
+  const companyIn = (s) => (SLAB_COMPANIES.find(([, re]) => re.test(s)) || [null])[0];
+  let text = null;
+  let company = companyIn(t);
+  if (company || SLAB_WORD.test(t)) text = t;
+  else if (!NOT_SLAB.test(d) && companyIn(d) && GRADE_TOKEN.test(d)) { text = d; company = companyIn(d); }
+  if (!text) return null;
+  let g = gradeTokenFrom(text);
+  if (!g && text === t && d && !NOT_SLAB.test(d)) g = gradeTokenFrom(d);
+  if (!g) {
+    // «NGC 58», «PCGS 63»: шкала по числу; одним числом пишут только высокие грейды (XF40 и выше)
+    const n = text.match(COMPANY_NUMBER);
+    if (n && parseInt(n[1], 10) >= 40) {
+      const num = parseInt(n[1], 10);
+      const scale = num >= 60 ? (/proof|пруф|cam(?:eo)?(?!\p{L})/iu.test(text) ? 'PF' : 'MS') : num >= 50 ? 'AU' : num >= 40 ? 'XF' : num >= 20 ? 'VF' : 'F';
+      g = { scale, num, grade: `${scale}${num}`, bucket: slabBucket(scale, num) };
+    }
+  }
+  const details = DETAILS.test(text);
+  return {
+    company: company || null,
+    grade: g ? g.grade : null,
+    scale: g ? g.scale : null,
+    num: g ? g.num : null,
+    bucket: g && !details ? g.bucket : null, // «UNC details» — проблемная монета, корзины нет
+    details,
+  };
+}
+
+// ---- Лоты на вес: «Серебро 500 гр», «лом серебра 875 пр. 100 г» ----
+const SILVER_HINT = /серебр|(?<![\p{L}])ag(?![\p{L}])|билон/iu;
+const BULK_HINT = /лом|россып|на вес|вес лота|общ\p{L}*\s+вес|общим весом|(?<![\p{L}])кг(?![\p{L}])|килограм/iu;
+const PURITIES = [999, 960, 958, 925, 916, 900, 875, 868, 835, 830, 800, 750, 720, 625, 600, 583, 500];
+const PURITY_DEFAULT = 0.5; // проба не указана: считаем по билону 500 — нижняя оценка смешанного серебра
+
+function gramsFrom(text) {
+  for (const m of (text || '').toLowerCase().matchAll(/(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(кг|килограм\p{L}*|грамм\p{L}*|гр|г)(?!\p{L})/gu)) {
+    const n = parseFloat(m[1].replace(',', '.'));
+    if (!(n > 0)) continue;
+    const kg = /^к/.test(m[2]);
+    if (!kg && m[2] === 'г' && Number.isInteger(n) && n >= 1000 && n <= 2100) continue; // «1898 г» — год
+    return kg ? n * 1000 : n;
+  }
+  return null;
+}
+
+// «Ag 925», «проба 900», «серебро 0,999», «Au 585», «925 пр.», «900°»
+function purityFrom(text) {
+  const t = (text || '').toLowerCase();
+  const m = t.match(/(?<!\p{L})(?:ag|au|проб\p{L}*|пр\.?|серебр\p{L}*|золот\p{L}*)\s*[-:]?\s*(?:0?[.,])?(\d{3})(?!\s*(?:г|гр|кг|грамм))(?!\d)|(?<![\d.,])(?:0?[.,])?(\d{3})\s*(?:проб\p{L}*|пр\.|°)/u);
+  const n = m ? parseInt(m[1] || m[2], 10) : null;
+  return n && PURITIES.includes(n) ? n / 1000 : null;
+}
+
+// ---- Содержание металла одной монеты по тексту лота (иностранные и современные монеты, где нет таблицы) ----
+// «1 oz», «Унция серебра», «1/2 унции» → чистый металл в унциях; «чистого серебра 31,1 г» → как написано;
+// «Ag 925» + «Вес монеты: 33,62 г» (поле ay.by или текст) → вес × проба. Возвращает { fineGrams, basis } или null.
+const OUNCE_G = 31.1035;
+const OUNCE = /(?<![\d.,\/])(?:(1\/2|1\/4|1\/10|1\/20|½|¼|\d+(?:[.,]\d+)?)\s*)?(?:тройск\p{L}*\s+)?(?:унци\p{L}*|oz)(?!\p{L})/iu;
+const STATED_FINE = /(?:чист\p{L}*\s+(?:серебр|золот|металл)\p{L}*|содержани\p{L}*\s+(?:чист\p{L}*\s+)?(?:серебр|золот|металл)\p{L}*)[^\d\n]{0,15}(\d+(?:[.,]\d+)?)\s*(?:г|гр|грамм\p{L}*)(?!\p{L})/iu;
+const GROSS = /(?:вес|масса)\p{L}*[^\d\n]{0,12}(\d+(?:[.,]\d+)?)\s*(?:г|гр|грамм\p{L}*)(?!\p{L})/iu;
+const fracValue = (s) => (!s ? 1 : s === '½' ? 0.5 : s === '¼' ? 0.25 : s.includes('/') ? 1 / parseInt(s.split('/')[1], 10) : parseFloat(s.replace(',', '.')));
+const fmtG = (n) => String(Math.round(n * 100) / 100).replace('.', ',');
+
+function contentFrom(title, description, specs = {}) {
+  const texts = [title || '', description || ''];
+  for (const [i, t] of texts.entries()) {
+    const m = t.match(OUNCE);
+    if (m) {
+      const oz = fracValue(m[1]);
+      if (oz > 0 && oz <= 5) return { fineGrams: Math.round(oz * OUNCE_G * 100) / 100, basis: `${i ? 'описание' : 'заголовок'}: ${String(oz).replace('.', ',')} унц.` };
+    }
+  }
+  for (const t of texts) {
+    const m = t.match(STATED_FINE);
+    const g = m ? parseFloat(m[1].replace(',', '.')) : null;
+    if (g > 0.5 && g <= 1100) return { fineGrams: g, basis: `указано ${fmtG(g)} г чистого металла` };
+  }
+  const purity = purityFrom(title) ?? purityFrom(description);
+  if (!purity) return null;
+  const specW = specs['Вес монеты'] || specs['Вес'] || specs['Масса'] || '';
+  const gm = specW.match(/(\d+(?:[.,]\d+)?)/) || (title || '').match(GROSS) || (description || '').match(GROSS);
+  const grams = gm ? parseFloat(gm[1].replace(',', '.')) : gramsFrom(title); // «3 рубля 1995 Ag 900 34,88 г»
+  if (!(grams > 0.5 && grams <= 1100)) return null;
+  return { fineGrams: Math.round(grams * purity * 100) / 100, basis: `${fmtG(grams)} г × проба ${Math.round(purity * 1000)}` };
+}
+
+// ---- Иностранные номиналы (кроме марок): для таблицы содержания металла (coins/metal.js WORLD) ----
+const WORLD_UNITS = [
+  ['доллар', /доллар\p{L}*|dollars?(?!\p{L})/u], ['цент', /цент\p{L}*|cents?(?!\p{L})/u], ['франк', /франк\p{L}*|francs?(?!\p{L})/u],
+  ['лира', /лир(?:а|ы|е)?(?!\p{L})|lire(?!\p{L})/u], ['гульден', /гульден\p{L}*/u], ['дукат', /дукат\p{L}*/u], ['крона', /крон(?:а|ы|ен|ер)?(?!\p{L})/u],
+  ['песо', /песо(?!\p{L})/u], ['злотый', /злот\p{L}*/u], ['соверен', /соверен\p{L}*|sovereign/u],
+];
+const WORLD_WORDS = [
+  [/полсоверен|1\/2\s*соверен|half\s*sovereign/u, 'соверен', 0.5], [/(?<!\p{L})соверен|sovereign/u, 'соверен', 1],
+  [/полдоллар|half\s*dollar/u, 'цент', 50], [/квотер|quarter/u, 'цент', 25], [/(?<!\p{L})(?:дайм|dime)(?!\p{L})/u, 'цент', 10],
+  [/морган|morgan|peace\s*dollar/u, 'доллар', 1], [/крюгерр?анд|krugerrand/u, 'крюгерранд', 1],
+];
+const COUNTRIES = [
+  ['США', /(?<!\p{L})(?:сша|usa)(?!\p{L})|соединенн\p{L}*\s+штат|морган|morgan|кеннеди|kennedy|peace\s*dollar/iu],
+  ['Польша', /польш|polsk/iu], ['Беларусь', /беларус|белорус|нб\s?рб|нацбанк/iu], ['Германия', /германи|рейх/iu],
+];
+
+function worldFrom(title, sectionPath, specs = {}) {
+  const t = stripStartBid(`${title || ''} ${specs['Номинал'] || ''}`.toLowerCase().replace(/ё/g, 'е'));
+  let unit = null, value = null;
+  for (const [u, re] of WORLD_UNITS) {
+    const m = t.match(new RegExp(`(?<![\\d\\/.,])(\\d+(?:[.,]\\d+)?|1\\/2|½)\\s*(?:${re.source})`, 'u'));
+    if (m) { unit = u; value = fracValue(m[1]); break; }
+  }
+  if (!unit) for (const [re, u, v] of WORLD_WORDS) if (re.test(t)) { unit = u; value = v; break; }
+  if (!unit) return null;
+  const where = `${sectionPath || ''} ${title || ''}`;
+  const country = (COUNTRIES.find(([, re]) => re.test(where)) || [null])[0];
+  return { unit, value, country };
+}
+
+function worldLabel(w) {
+  return w ? `${String(w.value).replace('.', ',')} ${w.unit}${w.country ? ` (${w.country})` : ''}` : null;
+}
+
+// Не монеты: столовое серебро и украшения с весом в заголовке — не лот монет на вес
+const NOT_BULK_COINS = /(?<!\p{L})(?:ложк|вилк|нож|кольц|серьг|цепоч|браслет|подстакан|рюмк|стопк|столов|ювелир|кулон|брош|часы|портсигар|оклад|икон)/iu;
+
+// Вес серебра в лоте: только если это действительно лот на вес — нет номинала (ни копеек, ни марок), подборка или
+// «лом / россыпь / кг» в заголовке. Вес одной монеты («1 рубль 1898, 20 г», «2 марки 1876, 11,1 г») сюда не попадает.
+function weightFrom(title, description, { denomKop = null, single = false, isSet = false } = {}) {
+  const t = title || '';
+  if (!SILVER_HINT.test(t) || NOT_BULK_COINS.test(t)) return null;
+  if (!((denomKop == null && !single) || isSet || BULK_HINT.test(t))) return null;
+  let grams = gramsFrom(t);
+  if (grams == null && BULK_HINT.test(t)) {
+    const dm = (description || '').match(/(?:общ\p{L}*\s+)?(?:вес|масса)\p{L}*[^.\n\d]{0,20}(\d+(?:[.,]\d+)?\s*(?:кг|гр?|грамм\p{L}*))(?!\p{L})/iu);
+    if (dm) grams = gramsFrom(dm[1]);
+  }
+  if (!(grams > 0)) return null;
+  const p = purityFrom(t) ?? purityFrom(description);
+  const purity = p ?? PURITY_DEFAULT;
+  return { grams, purity, purityAssumed: p == null, fineGrams: Math.round(grams * purity * 10) / 10 };
+}
+
+// «без МЦ», «без мин. цены», «без МПЦ» — продавец не ставил минимальную (резервную) цену
+const NO_RESERVE = /(?<!\p{L})без\s*(?:мин(?:имальн\p{L}*)?\.?\s*(?:цен\p{L}*)?|м\.?\s?[пн]?\.?\s?ц\.?|резерв\p{L}*)(?!\p{L})/iu;
+
 // Знак минцмейстера / двора: «1912 ЭБ», «СПБ АГ», «ЕМ», «ПЛ» (СССР на гурте)
 const MINT_MARKS = ['СПБ', 'ЕМ', 'КМ', 'АМ', 'ММ', 'СМ', 'ВМ', 'ТМ', 'ИМ', 'МД', 'БМ', 'ММД', 'ЛМД'];
 const MINTMASTERS = ['АГ', 'ЭБ', 'ФЗ', 'ВС', 'НФ', 'НІ', 'НI', 'НИ', 'МИ', 'ФБ', 'ДС', 'СШ', 'АИ', 'МФ', 'НГ', 'ПС', 'ЯИ', 'АР', 'ПЛ', 'ТР', 'ПФ', 'АЯ', 'СП', 'ХФ', 'ПД', 'АБ', 'ПУ', 'ДМ', 'СА', 'КБ', 'ЯВ', 'ПГ', 'ВН', 'ГР', 'ЕИ'];
@@ -82,7 +323,13 @@ function mintFrom(title) {
   return out;
 }
 
-function metalFrom(title, sectionPath, denomKop, year, specMetal = null) {
+// Германия: серебряные марки Империи и Веймара/Рейха, золотые 10 и 20 марок до 1915. [номинал, год от, год до, металл]
+const GERMAN_METAL = [
+  [0.5, 1905, 1919, 'silver'], [1, 1873, 1916, 'silver'], [1, 1925, 1927, 'silver'], [2, 1876, 1915, 'silver'], [2, 1925, 1939, 'silver'],
+  [3, 1908, 1918, 'silver'], [3, 1924, 1933, 'silver'], [5, 1874, 1915, 'silver'], [5, 1925, 1939, 'silver'], [10, 1871, 1915, 'gold'], [20, 1871, 1915, 'gold'],
+];
+
+function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign = null) {
   // поле «Металл» лота ay.by — самый надёжный источник
   const sm = (specMetal || '').toLowerCase();
   if (/серебр/.test(sm)) return 'silver';
@@ -112,6 +359,10 @@ function metalFrom(title, sectionPath, denomKop, year, specMetal = null) {
   if (year >= 1700 && year <= 1917 && [100, 50, 25, 20, 15, 10, 5].includes(denomKop) && !/медь|медн/.test(t)) return 'silver';
   // Империя: 3, 5, 7½, 10, 15, 25, 37½ рублей — только золото (серебряных монет таких номиналов не было)
   if (year >= 1700 && year <= 1917 && [300, 500, 750, 1000, 1500, 2500, 3750].includes(denomKop)) return 'gold';
+  if (foreign && foreign.unit === 'марка') {
+    const row = GERMAN_METAL.find(([v, from, to]) => v === foreign.value && year >= from && year <= to);
+    if (row) return row[3];
+  }
   return null;
 }
 
@@ -143,9 +394,10 @@ const FLAG_PATTERNS = [
   ['отверстие', /дырк|дыроч|отверст|подвес|запа[йя]|пайк|ушк/iu],
   ['чистка', /чищен|чистк|почищ|полиров|зачищ/iu],
   ['повреждения', /царап|забоин|потерт|вмятин|гнут|изгиб|коррози|окисл|пятн|следы/iu],
-  ['слаб', /\bngc\b|\bpcgs\b|ннр|рнга|слаб/iu],
+  // флаг «слаб» ставит parseCoin по slabFrom: простое «слаб» ловило «слабый чекан»
   // «лот из 3», «одним лотом 3 монеты», «3 монеты», «20 15 10 копеек», «1 и 2 копейки»
-  ['несколько монет', /лот из \d|подборк|набор|\d+\s*шт\b|\d+\s*штук|одним лотом|(?<![\d\/])(?:[2-9]|[1-9]\d{1,2})\s*монет|(?<![\d\/])(?:\d{1,2}[\s,;]+(?:и\s+)?)+\d{1,2}\s*коп/iu],
+  // «из набора ГБ СССР» — одна монета из банковского набора, не подборка
+  ['несколько монет', /лот из \d|подборк|(?<!из\s+(?:\p{L}+\s+)?)набор|\d+\s*шт\b|\d+\s*штук|одним лотом|(?<![\d\/])(?:[2-9]|[1-9]\d{1,2})\s*монет|(?<![\d\/])(?:\d{1,2}[\s,;]+(?:и\s+)?)+\d{1,2}\s*коп/iu],
   ['редкая', /редк|\bR\b|\bR[1-9]\b|биткин\s*r/iu],
 ];
 function flagsFrom(title, description) {
@@ -165,40 +417,100 @@ function parseCoin({ title, sectionPath, conditionText, description, specs = {} 
   const denomKop = denominationFrom(title);
   const year = yearFrom(title);
   const mint = mintFrom(title);
-  const metal = metalFrom(title, sectionPath, denomKop, year, specs['Металл'] || null);
+  const foreign = denomKop == null ? foreignFrom(title, sectionPath, year) : null;
+  const world = denomKop == null && !foreign ? worldFrom(title, sectionPath, specs) : null;
+  const metal = metalFrom(title, sectionPath, denomKop, year, specs['Металл'] || null, foreign);
   const ay = gradeFromAyby(conditionText);
   const titleGrade = gradeFromTitle(title);
+  const flags = flagsFrom(title, description);
+  const slab = slabFrom(title, description);
+  if (slab) flags.push('слаб');
+  const weight = weightFrom(title, description, { denomKop, single: Boolean(foreign || world), isSet: flags.includes('несколько монет') });
+  const finalMetal = weight ? 'silver' : metal;
+  // одна монета из драгметалла: содержание по тексту (унции, «чистого серебра N г», вес × проба)
+  const content = !weight && (finalMetal === 'silver' || finalMetal === 'gold') && !flags.includes('несколько монет')
+    ? contentFrom(title, description, specs) : null;
   return {
     denomKop,
-    denomination: denominationLabel(denomKop),
+    denomination: denominationLabel(denomKop) || foreignLabel(foreign) || worldLabel(world),
     year,
-    ruler: year ? rulerFor(year) : (sectionPath && /ссср/i.test(sectionPath) ? 'СССР' : null),
+    // правитель — только у монет в копейках/рублях: «20 франков 1910» не Николай II
+    ruler: year && denomKop != null ? rulerFor(year) : (!year && sectionPath && /ссср/i.test(sectionPath) ? 'СССР' : null),
     mint: mint.mint || null,
     mintmaster: mint.mintmaster || null,
-    metal,
-    isSilver: metal === 'silver',
-    isGold: metal === 'gold',
-    isPrecious: metal === 'silver' || metal === 'gold',
+    foreign,
+    world,
+    content,
+    metal: finalMetal,
+    isSilver: Boolean(weight) || metal === 'silver',
+    isGold: !weight && metal === 'gold',
+    isPrecious: Boolean(weight) || metal === 'silver' || metal === 'gold',
     conditionCode: ay.code || null,
     grade: ay.grade || titleGrade || null,
     gradeSource: ay.grade ? 'ayby' : titleGrade ? 'title' : null,
     titleGrade,
-    flags: flagsFrom(title, description),
+    slab,
+    weight,
+    noReserve: NO_RESERVE.test(title || ''),
+    flags,
   };
 }
 
-// Ключи группировки от узкого к широкому (состояние — отдельное измерение)
+// Kufar: коллекция, альбом, россыпь, наследство — разбирать по фото (ориентира нет, бывают дорогие монеты за бесценок).
+// «Из моей коллекции», «для коллекции», пустые альбомы и бумага — нет. Возвращает короткую причину или null.
+const COLLECTION_HINTS = [
+  ['коллекция', /(?<!(?:из|для|в)\s+(?:моей\s+|личной\s+|вашей\s+)?)коллекци(?:я|ю|и)(?!\p{L})/iu],
+  ['альбом / кляссер', /кляссер|альбом\p{L}*\s+(?:с\s+)?монет|монет\p{L}*\s+в\s+альбом/iu],
+  ['россыпь', /россып\p{L}*|на\s+вес(?!\p{L})|(?<!\p{L})кг(?!\p{L})|килограм\p{L}*|мешок|банк[аиу]\s+(?:с\s+)?монет/iu],
+  ['наследство', /наследств\p{L}*|от\s+(?:деда|дедушки|бабушки|бабули|отца|папы)(?!\p{L})/iu],
+  ['много монет', /(?<![\d.,])(?:[2-9]\d|[1-9]\d{2,})\s*(?:шт\p{L}*|монет\p{L}*)(?!\p{L})|много\s+монет|монеты\s+(?:разные|старые|ссср|царские|империи)(?:\s*$|[,.!])/iu],
+];
+const NOT_COLLECTION = /для\s+(?:монет|банкнот|бон)|пуст\p{L}*|без\s+монет|банкнот|(?<!\p{L})бон[аыу]?(?!\p{L})|купюр|значк|марк[аи]\s+почт|почтов|открыт/iu;
+
+function collectionHint(title, text = '') {
+  const t = `${title || ''} ${text || ''}`;
+  if (NOT_COLLECTION.test(title || '')) return null;
+  const hit = COLLECTION_HINTS.find(([, re]) => re.test(t));
+  return hit ? hit[0] : null;
+}
+
+// Почему лот нельзя присылать при любой цене (общее правило для ay.by, Kufar, отчёта и фото): копия; подборка,
+// если это не лот серебра на вес; слаб не на аукционе (фиксированные цены на слабы завышены, подделки обычны).
+// null — препятствий нет. saleType: 'auction' | 'auction_buynow' | 'buy_now' | 'fixed' (Kufar).
+function notifyBlocker(parsed, saleType = null) {
+  if (!parsed) return 'не разобрано';
+  const flags = parsed.flags || [];
+  if (flags.includes('копия')) return 'копия';
+  if (flags.includes('несколько монет') && !parsed.weight) return 'подборка / несколько монет';
+  if (parsed.slab && !/auction/.test(saleType || '')) return 'слаб по фиксированной цене (только аукционы)';
+  return null;
+}
+
+// Ключи группировки от узкого к широкому (состояние — отдельное измерение). level: variant (буквы/земля),
+// type (номинал и год), ruler (номинал за всё правление — только как последний запасной вариант)
 function groupKeys(p) {
   const keys = [];
-  if (p.denomKop == null) return keys;
+  if (p.denomKop == null) {
+    // марки: «M3|1911|A|Пруссия» → «M3|1911|A» → «M3|1911» (памятные разных земель одного года не смешиваются, пока есть данные)
+    const f = p.foreign;
+    if (!f || !p.year) return keys;
+    const d = p.denomination;
+    if (f.mint && f.state) keys.push({ key: `${f.key}|${p.year}|${f.mint}|${f.state}`, label: `${d} ${p.year} ${f.mint}, ${f.state}`, level: 'variant' });
+    if (f.mint) keys.push({ key: `${f.key}|${p.year}|${f.mint}`, label: `${d} ${p.year} ${f.mint}`, level: 'variant' });
+    keys.push({ key: `${f.key}|${p.year}`, label: `${d} ${p.year}`, level: 'type' });
+    return keys;
+  }
+  // после 1991 (памятные НБРБ и Банка России): под одним номиналом и годом — десятки разных монет, сравнивать нельзя
+  if (p.year > 1991) return keys;
   const d = p.denomination;
-  if (p.year && p.mintmaster) keys.push({ key: `${p.denomKop}|${p.year}|${p.mintmaster}`, label: `${d} ${p.year} ${p.mintmaster}` });
-  if (p.year) keys.push({ key: `${p.denomKop}|${p.year}`, label: `${d} ${p.year}` });
-  if (p.ruler) keys.push({ key: `${p.denomKop}|${p.ruler}`, label: `${d}, ${p.ruler}` });
+  if (p.year && p.mintmaster) keys.push({ key: `${p.denomKop}|${p.year}|${p.mintmaster}`, label: `${d} ${p.year} ${p.mintmaster}`, level: 'variant' });
+  if (p.year) keys.push({ key: `${p.denomKop}|${p.year}`, label: `${d} ${p.year}`, level: 'type' });
+  if (p.ruler) keys.push({ key: `${p.denomKop}|${p.ruler}`, label: `${d}, ${p.ruler}`, level: 'ruler' });
   return keys;
 }
 
 module.exports = {
-  parseCoin, groupKeys, denominationFrom, denominationLabel, yearFrom, mintFrom, metalFrom,
-  gradeFromAyby, gradeFromTitle, flagsFrom, rulerFor, GRADE_ORDER, AYBY_GRADES,
+  parseCoin, groupKeys, notifyBlocker, denominationFrom, denominationLabel, yearFrom, mintFrom, metalFrom,
+  gradeFromAyby, gradeFromTitle, flagsFrom, rulerFor, slabFrom, gradeTokenFrom, weightFrom, contentFrom, worldFrom, purityFrom, collectionHint,
+  GRADE_ORDER, AYBY_GRADES, SLAB_RAW_EQUIV,
 };

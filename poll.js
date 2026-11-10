@@ -32,9 +32,12 @@ async function getUpdates(offset) {
 
 // ---- Settings (checkbox list of monitors) ----
 
+// Мониторы, которые только собирают цены (notify: false в config.js), в настройках не показываются
+const SETTINGS_MONITORS = MONITORS.filter((m) => m.notify !== false);
+
 function buildKeyboard(subs) {
   return {
-    inline_keyboard: MONITORS.map((m) => [{
+    inline_keyboard: SETTINGS_MONITORS.map((m) => [{
       text: `${subs.has(m.key) ? '✅' : '☐'} ${m.emoji || ''} ${m.name}`.trim(),
       callback_data: `sub:${m.key}`,
     }]),
@@ -48,7 +51,7 @@ const SETTINGS_TEXT =
 
 // Monitors this chat received under the legacy config (chatIds / TELEGRAM_CHAT_IDS)
 function legacyMonitorKeys(chatId) {
-  return MONITORS
+  return SETTINGS_MONITORS
     .filter((m) => !m.optIn)
     .filter((m) => (m.chatIds && m.chatIds.length ? m.chatIds : DEFAULT_CHAT_IDS).includes(chatId))
     .map((m) => m.key);
@@ -129,7 +132,7 @@ async function handleCallback(cb) {
 
   if (data.startsWith('sub:')) {
     const key = data.slice(4);
-    const monitor = MONITORS.find((m) => m.key === key);
+    const monitor = SETTINGS_MONITORS.find((m) => m.key === key);
     if (!monitor) {
       await tg('answerCallbackQuery', { callback_query_id: cb.id, text: 'Категория больше не отслеживается' });
       return;

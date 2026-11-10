@@ -1,5 +1,7 @@
 // Загрузка архива проходов gdenashel.ru в listings.coin_sales и пересчёт каталога listings.coin_catalog
-// (медиана по типу монеты и состоянию за последние N лет, RUB → BYN по курсу НБРБ). Нужна миграция 012.
+// (медиана по типу монеты и состоянию за последние N лет, RUB → BYN по курсу НБРБ). Нужны миграции 012 и 015.
+// Пересчёт заново раскладывает состояния проходов (слабы — по корзинам MS60-62 … MS66+, см. gdenashel.normalizeGrade)
+// и пишет годы, за которые есть цены. Цены последних ~12 месяцев gdenashel без подписки не показывает.
 //
 //   node load-catalog.js                      все разделы (серебро и золото империи, серебро и червонцы СССР), проходы за 3 года
 //   node load-catalog.js --only zoloto        только золото империи (плюс --only odin-chervonec для СССР)
@@ -135,7 +137,7 @@ async function main() {
     console.log(`[Catalog] монет ${coins}, проходов получено ${sales}${errors ? `, ошибок ${errors}` : ''}`);
   }
   if (!DRY) {
-    const n = await cstore.rebuildCatalogFromSales(SOURCE, YEARS, rate);
+    const n = await cstore.rebuildCatalogFromSales(SOURCE, YEARS, rate, 2, g.normalizeGrade);
     console.log(`[Catalog] записей каталога (${SOURCE}): ${n}`);
   }
 }

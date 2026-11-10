@@ -1,9 +1,11 @@
 // Оценка монеты: цены источников (архив проходов gdenashel.ru, Numista) и наша медиана по похожим лотам
-// того же состояния. Ориентир для «выгодно/нет» — самый низкий из источников с ТОЧНЫМ состоянием лота;
-// если точного нет ни у кого — ближайшее состояние ниже из каталогов; если нет и его — лот только
-// сохраняется, уведомление не уходит.
+// того же состояния. Ориентир для «выгодно/нет»:
+//   1) наши продажи за последние 12 месяцев (≥ MIN_SAMPLES) — тот же рынок и свежие цены, главнее архива;
+//   2) иначе самый низкий из источников с ТОЧНЫМ состоянием лота;
+//   3) иначе ближайшее состояние ниже из каталогов; если нет и его — лот только сохраняется.
+// Слабы оцениваются отдельно: только по слабам той же корзины грейда (MS63, MS64, MS65…), а не по сырой UNC.
 
-const { groupKeys, GRADE_ORDER } = require('./parse');
+const { groupKeys, GRADE_ORDER, slabFrom, SLAB_RAW_EQUIV } = require('./parse');
 
 // «Выгодно» — либо разница с ориентиром не меньше BARGAIN_BYN рублей (дорогие лоты: 50 р. с лота за 300 р. — уже
 // интересно, хотя это лишь 17%), либо лот дешевле ориентира на BARGAIN_PCT процентов и при этом разница
@@ -13,6 +15,14 @@ const BARGAIN_BYN = parseFloat(process.env.COINS_BARGAIN_BYN || '50');
 const BARGAIN_MIN_BYN = parseFloat(process.env.COINS_BARGAIN_MIN_BYN || '10');
 const MIN_SAMPLES = 3;
 const MIN_PRICE = 2; // ставки «с рубля» без ставок — не цена
+const RECENT_DAYS = 365;
+// Слаб дешевле этого — цена почти целиком стоимость слабирования (10–20 коп. 1915 в слабе стоят 45–60 р. при любом грейде)
+const SLAB_MIN_BYN = parseFloat(process.env.COINS_SLAB_MIN_BYN || '60');
+// Тихий лот: аукцион, до конца ≤ QUIET_HOURS, ставок ≤ QUIET_MAX_BIDS, минимальная цена продавца не мешает,
+// ориентир ≥ QUIET_MIN_REF. Так покупают опытные продавцы: одна ставка на лот, за который никто не торгуется.
+const QUIET_HOURS = parseFloat(process.env.COINS_QUIET_HOURS || '24');
+const QUIET_MAX_BIDS = parseInt(process.env.COINS_QUIET_MAX_BIDS || '1', 10);
+const QUIET_MIN_REF = parseFloat(process.env.COINS_QUIET_MIN_REF || '30');
 
 // Тысячи через обычный пробел (toLocaleString('ru') ставит узкий неразрывный U+202F, он ломает сравнение строк)
 const num = (n) => String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
@@ -35,28 +45,56 @@ function usablePrice(r) {
   return p >= MIN_PRICE ? { price: p, sold: false } : null;
 }
 
-// Наша оценка: медиана по той же группе и тому же состоянию; группа сужается, пока хватает данных
-function marketEstimate(rows, parsed, excludeId = null) {
-  if (!parsed.grade) return null;
+// Разбор строки базы. У лотов, сохранённых до разбора слабов, slab нет — восстанавливаем по заголовку,
+// иначе слаб MS65 за 900 р. попадал в медиану сырой UNC
+function rowParsed(r) {
+  const p = typeof r.parsed === 'string' ? JSON.parse(r.parsed) : r.parsed;
+  if (p && p.slab === undefined) p.slab = slabFrom(r.title || '', '');
+  return p;
+}
+
+const bucketOf = (p) => (p && p.slab && p.slab.bucket) || null;
+
+// Наша оценка: медиана по той же группе и тому же состоянию (для слаба — той же корзине грейда);
+// группа расширяется (буквы → год → правление), пока не наберётся данных. recent — продажи за последние RECENT_DAYS дней.
+function marketEstimate(rows, parsed, excludeId = null, now = Date.now()) {
+  const bucket = bucketOf(parsed);
+  if (!bucket && (parsed.slab && parsed.slab.details)) return null; // «UNC details» — не с чем сравнить
+  if (!bucket && !parsed.grade) return null;
+  const since = now - RECENT_DAYS * 86400e3;
   const candidates = [];
+  // лот ay.by может вести и раздел, и монитор продавцов — одна продажа считается один раз (берём копию с итогом)
+  const keyOf = (r) => (r.external_id != null ? `${r.source}|${r.external_id}` : null);
+  const best = new Map();
   for (const r of rows) {
-    if (r.id === excludeId || !r.parsed || r.grade !== parsed.grade) continue;
+    const k = keyOf(r);
+    if (k && (!best.has(k) || (!best.get(k).outcome && r.outcome))) best.set(k, r);
+  }
+  for (const r of rows) {
+    if (r.id === excludeId || !r.parsed) continue;
+    const k = keyOf(r);
+    if (k && best.get(k) !== r) continue;
+    const p = rowParsed(r);
+    if (bucket ? bucketOf(p) !== bucket : (p.slab || r.grade !== parsed.grade)) continue;
     const up = usablePrice(r);
     if (!up || !(up.price > 0)) continue;
-    const p = typeof r.parsed === 'string' ? JSON.parse(r.parsed) : r.parsed;
     if (p.flags && (p.flags.includes('копия') || p.flags.includes('несколько монет'))) continue;
-    candidates.push({ ...up, keys: new Set(groupKeys(p).map((k) => k.key)) });
+    const at = r.ended_at || r.last_seen;
+    const recent = up.sold && at != null && new Date(at).getTime() >= since;
+    candidates.push({ ...up, recent, keys: new Set(groupKeys(p).map((k) => k.key)) });
   }
   for (const g of groupKeys(parsed)) {
     const inGroup = candidates.filter((c) => c.keys.has(g.key));
     if (inGroup.length < MIN_SAMPLES) continue;
     const sold = inGroup.filter((c) => c.sold).map((c) => c.price);
+    const recent = inGroup.filter((c) => c.recent).map((c) => c.price);
     const all = inGroup.map((c) => c.price);
     return {
-      label: g.label, grade: parsed.grade, n: all.length, soldN: sold.length,
+      label: g.label, level: g.level, grade: bucket ? `слаб ${bucket}` : parsed.grade, n: all.length, soldN: sold.length,
       median: median(all), soldMedian: median(sold),
       refMedian: sold.length >= MIN_SAMPLES ? median(sold) : median(all),
       refSource: sold.length >= MIN_SAMPLES ? 'sold' : 'all',
+      recentN: recent.length, recentMedian: median(recent),
     };
   }
   return null;
@@ -100,53 +138,90 @@ function rarityTier({ konros = null, passes = null, windowYears = null, mintage 
     level = 1;
   }
   if (mintage) reasons.push(`тираж ${num(mintage)}`);
-  if (passes != null) reasons.push(`${passes} прох. за ${windowYears} г.`);
+  if (passes != null) reasons.push(`${passes} прох. за ${String(windowYears).replace('.', ',')} г.`);
   return { ...TIERS[level], konros: konros || null, mintage: mintage || null, passes, reason: reasons.join(' · ') };
 }
 
 const sumSamples = (samples) => samples ? Object.values(samples).reduce((s, n) => s + (n || 0), 0) : null;
+
+// Годы, за которые реально есть цены: «2023–2025» (архив прячет цены последних ~12 месяцев, окно «3 года» врёт)
+function periodLabel(period) {
+  if (!period || !period.from || !period.to) return null;
+  const a = String(period.from).slice(0, 4), b = String(period.to).slice(0, 4);
+  return a === b ? a : `${a}–${b}`;
+}
+// Длина периода в годах (для частоты проходов); без периода — заявленное окно
+function periodYears(period, fallback) {
+  if (!period || !period.from || !period.to) return fallback || null;
+  const y = (new Date(period.to) - new Date(period.from)) / (365.25 * 86400e3);
+  return Math.max(0.5, Math.round(y * 10) / 10);
+}
 
 // Цена, ниже которой лот дорогого типа скорее копия, чем удача: ориентир ≥ SUSPECT_MIN_REF р., цена ≤ SUSPECT_SHARE
 // от ориентира. Проверяется только для фиксированных цен — ставка 9 р. в начале аукциона ничего не значит
 const SUSPECT_MIN_REF = 100;
 const SUSPECT_SHARE = 0.2;
 
+const catalogEntry = (c, cp) => ({ ...cp, source: c.source, title: c.title, samples: c.samples ? c.samples[cp.grade] : null,
+  passes: sumSamples(c.samples), windowYears: c.windowYears || null, period: c.period || null, factor: c.factor });
+
 // metal — { metal, grams, value } из coins/metal.js: стоимость металла в монете, нижняя планка при любом состоянии.
 // fixedPrice — цена фиксированная (купить сейчас / Kufar), а не текущая ставка аукциона.
-function assess({ parsed, price, rows = [], excludeId = null, catalog = null, catalogs = null, coinType = null, metal = null, fixedPrice = false, bargainPct = BARGAIN_PCT, bargainByn = BARGAIN_BYN, minByn = BARGAIN_MIN_BYN }) {
-  const market = marketEstimate(rows, parsed, excludeId);
+function assess({ parsed, price, rows = [], excludeId = null, catalog = null, catalogs = null, coinType = null, metal = null, fixedPrice = false, bargainPct = BARGAIN_PCT, bargainByn = BARGAIN_BYN, minByn = BARGAIN_MIN_BYN, now = Date.now() }) {
+  const market = marketEstimate(rows, parsed, excludeId, now);
   const list = catalogs || (catalog ? [catalog] : []);
-  const cats = list.map((c) => {
-    const cp = catalogPrice(c, parsed.grade);
-    return cp ? { ...cp, source: c.source, title: c.title, samples: c.samples ? c.samples[cp.grade] : null, passes: sumSamples(c.samples), windowYears: c.windowYears || null, factor: c.factor } : null;
-  }).filter(Boolean);
+  const bucket = bucketOf(parsed);
+  const slabDetails = Boolean(parsed.slab && parsed.slab.details && !bucket);
+  let cats = [];
+  if (bucket) {
+    // слаб: только та же корзина; нижние корзины (MS60–62, AU50–58…) по цене ≈ сырая монета — её и берём, если слабов нет
+    cats = list.filter((c) => c.prices && c.prices[bucket] != null).map((c) => catalogEntry(c, { price: c.prices[bucket], grade: bucket, exact: true }));
+    const rawEq = SLAB_RAW_EQUIV[bucket];
+    if (!cats.length && rawEq) {
+      cats = list.map((c) => { const cp = catalogPrice(c, rawEq); return cp && cp.exact ? { ...catalogEntry(c, cp), rawEquiv: bucket } : null; }).filter(Boolean);
+    }
+  } else if (!slabDetails) {
+    cats = list.map((c) => { const cp = catalogPrice(c, parsed.grade); return cp ? catalogEntry(c, cp) : null; }).filter(Boolean);
+  }
   const cat = cats[0] || null;
-  // Ориентир — самый низкий из источников с точным состоянием лота (сравнивать VF с «ближайшим XF» нельзя);
-  // ближайшее состояние ниже — только если точного нет ни у кого. Минимум, а не первый источник: архив РФ
-  // за слабы даёт в разы больше, чем стоит сырая монета у нас, и «выгодно» по завышенному ориентиру ничего не стоит
-  const asCandidate = (c) => ({ price: c.price, source: c.source });
-  const exact = [...cats.filter((c) => c.exact).map(asCandidate), ...(market ? [{ price: market.refMedian, source: 'market' }] : [])];
-  const candidates = (exact.length ? exact : cats.map(asCandidate)).filter((c) => c.price > 0).sort((a, b) => a.price - b.price);
-  const reference = candidates.length ? candidates[0].price : null;
-  const referenceSource = candidates.length ? candidates[0].source : null;
-  // Слабы MS64+ по тому же типу — только для справки при UNC/AU-лотах
-  const slabbedSrc = ['UNC', 'AU'].includes(parsed.grade) ? list.find((c) => c.prices && c.prices['MS64+'] != null) : null;
-  const slabbed = slabbedSrc ? { source: slabbedSrc.source, price: slabbedSrc.prices['MS64+'], samples: slabbedSrc.samples ? slabbedSrc.samples['MS64+'] : null, windowYears: slabbedSrc.windowYears || null } : null;
+  // Ориентир — свежие продажи нашей базы, иначе самый низкий из источников с точным состоянием лота (сравнивать VF
+  // с «ближайшим XF» нельзя); ближайшее состояние ниже — только если точного нет ни у кого. Минимум, а не первый
+  // источник: архив РФ даёт больше, чем стоит монета у нас, и «выгодно» по завышенному ориентиру ничего не стоит
+  let reference = null, referenceSource = null, referenceRecent = false;
+  // свежие продажи главнее архива только по тому же номиналу и году: медиана «рубль Николая II» за любой год
+  // не заменяет цену конкретного 1899 года
+  if (market && market.level !== 'ruler' && market.recentN >= MIN_SAMPLES) {
+    reference = market.recentMedian; referenceSource = 'market'; referenceRecent = true;
+  } else {
+    const asCandidate = (c) => ({ price: c.price, source: c.source });
+    const exact = [...cats.filter((c) => c.exact).map(asCandidate), ...(market ? [{ price: market.refMedian, source: 'market' }] : [])];
+    const candidates = (exact.length ? exact : cats.map(asCandidate)).filter((c) => c.price > 0).sort((a, b) => a.price - b.price);
+    reference = candidates.length ? candidates[0].price : null;
+    referenceSource = candidates.length ? candidates[0].source : null;
+  }
+  // Слабы MS64 по тому же типу — для справки при сырых UNC/AU-лотах: сколько стоила бы монета в слабе
+  // ('MS64+' — каталог, пересчитанный до разбивки на корзины)
+  const slabbedSrc = !parsed.slab && ['UNC', 'AU'].includes(parsed.grade) ? list.find((c) => c.prices && (c.prices.MS64 != null || c.prices['MS64+'] != null)) : null;
+  const slabbedKey = slabbedSrc && (slabbedSrc.prices.MS64 != null ? 'MS64' : 'MS64+');
+  const slabbed = slabbedSrc ? { source: slabbedSrc.source, grade: slabbedKey, price: slabbedSrc.prices[slabbedKey], samples: slabbedSrc.samples ? slabbedSrc.samples[slabbedKey] : null, windowYears: slabbedSrc.windowYears || null, period: slabbedSrc.period || null } : null;
   const hasPrice = price != null && price >= MIN_PRICE;
   const deviationPct = reference && hasPrice ? Math.round(((price - reference) / reference) * 100) : null;
   const gainByn = reference && hasPrice ? Math.round(reference - price) : null;
   const gd = list.find((c) => c.source === 'gdenashel');
-  const rarity = coinType || gd ? rarityTier({ konros: coinType && coinType.konros, mintage: coinType && coinType.mintage, passes: gd ? sumSamples(gd.samples) : null, windowYears: gd ? gd.windowYears : null }) : null;
+  const gdYears = gd ? periodYears(gd.period, gd.windowYears) : null;
+  const rarity = coinType || gd ? rarityTier({ konros: coinType && coinType.konros, mintage: coinType && coinType.mintage, passes: gd ? sumSamples(gd.samples) : null, windowYears: gdYears }) : null;
   // Металл: не медиана, а пол. Он не участвует в выборе ориентира (иначе VF-рубль за 100 р. выглядел бы «выше
   // ориентира 85 р.»), но лот ниже металла на порог выгоды — выгоден при любом состоянии
   const metalValue = metal && metal.value > 0 ? metal.value : null;
   const belowMetal = metalValue != null && hasPrice && isBargain({ price, reference: metalValue, bargainPct, bargainByn, minByn });
   const metalGain = metalValue != null && hasPrice ? Math.round(metalValue - price) : null;
-  const byReference = isBargain({ price, reference, bargainPct, bargainByn, minByn });
+  // слаб дешёвой монеты: вся цена — стоимость слабирования, перепродать дороже не выйдет
+  const slabCheap = Boolean(parsed.slab) && reference != null && reference < SLAB_MIN_BYN;
+  const byReference = !slabCheap && isBargain({ price, reference, bargainPct, bargainByn, minByn });
   const suspect = fixedPrice && hasPrice && reference >= SUSPECT_MIN_REF && price <= reference * SUSPECT_SHARE;
   return {
-    market, catalog: cat, catalogs: cats, slabbed, rarity,
-    reference, referenceSource, deviationPct, gainByn,
+    market, catalog: cat, catalogs: cats, slabbed, rarity, slab: parsed.slab || null, slabCheap, slabDetails,
+    reference, referenceSource, referenceRecent, deviationPct, gainByn,
     metal: metalValue != null ? { ...metal, gain: metalGain, below: belowMetal } : null,
     suspect,
     isBargain: byReference || belowMetal,
@@ -154,32 +229,62 @@ function assess({ parsed, price, rows = [], excludeId = null, catalog = null, ca
   };
 }
 
+// Тихий лот: аукцион без конкуренции под конец торгов. Цена «с рубля» здесь не мешает — смысл как раз в том, чтобы
+// забрать его одной ставкой. Возвращает { ref, max, refSource, hoursLeft } или null. max — разумная максимальная
+// ставка: ориентир минус BARGAIN_PCT (тот же порог, что и «выгодно»).
+function quietLot(est, lot, { now = Date.now(), hours = QUIET_HOURS, maxBids = QUIET_MAX_BIDS, minRef = QUIET_MIN_REF, pct = BARGAIN_PCT } = {}) {
+  if (!est || !lot || lot.ended || !/auction/.test(lot.saleType || '')) return null;
+  if ((lot.bids || 0) > maxBids || lot.reserve === 'not_met' || est.slabCheap) return null;
+  const hoursLeft = lot.endsAt ? (new Date(lot.endsAt).getTime() - now) / 3600e3 : null;
+  if (hoursLeft == null || hoursLeft <= 0 || hoursLeft > hours) return null;
+  const fromMetal = est.reference == null && est.metal;
+  const ref = est.reference != null ? est.reference : fromMetal ? est.metal.value : null;
+  if (!(ref >= minRef)) return null;
+  const max = Math.floor(ref * (1 - pct / 100));
+  if ((lot.price || 0) > max) return null;
+  return { ref, max, refSource: fromMetal ? 'metal' : est.referenceSource, hoursLeft };
+}
+
 const fmt = (n) => `${num(n)} р.`;
 const SOURCE_NAMES = { gdenashel: 'gdenashel.ru, аукционы РФ', numista: 'Numista' };
 const srcName = (s) => SOURCE_NAMES[s] || s;
+const passesText = (samples, period, windowYears) => {
+  if (!samples) return '';
+  const p = periodLabel(period);
+  return `, ${samples} прох.${p ? `, ${p}` : windowYears ? ` за ${windowYears} г.` : ''}`;
+};
 
 // Строки карточки: каждый источник отдельно, чтобы не смешивать; вердикт — по самому низкому ориентиру
 function formatEstimateLines(est) {
   if (!est) return [];
   const lines = [];
   for (const c of est.catalogs || []) {
-    const n = c.samples ? `, ${c.samples} прох.${c.windowYears ? ` за ${c.windowYears} г.` : ''}` : '';
     const k = c.factor && c.factor !== 1 ? `, ×${c.factor}` : '';
-    lines.push(`📚 ${srcName(c.source)} (${c.grade}${c.exact ? '' : ', ближайшее состояние'}${n}${k}): ${fmt(c.price)}`);
+    const g = c.rawEquiv ? `${c.grade} без слаба — слабов ${c.rawEquiv} в архиве нет` : est.slab && est.slab.bucket ? `слаб ${c.grade}` : `${c.grade}${c.exact ? '' : ', ближайшее состояние'}`;
+    lines.push(`📚 ${srcName(c.source)} (${g}${passesText(c.samples, c.period, c.windowYears)}${k}): ${fmt(c.price)}`);
   }
   if (est.slabbed) {
-    const n = est.slabbed.samples ? `, ${est.slabbed.samples} прох.${est.slabbed.windowYears ? ` за ${est.slabbed.windowYears} г.` : ''}` : '';
-    lines.push(`🏛 ${srcName(est.slabbed.source).split(',')[0]}, слабы MS64+${n}: ${fmt(est.slabbed.price)} — для справки, не ориентир`);
+    lines.push(`🏛 ${srcName(est.slabbed.source).split(',')[0]}, слабы ${est.slabbed.grade}${passesText(est.slabbed.samples, est.slabbed.period, est.slabbed.windowYears)}: ${fmt(est.slabbed.price)} — для справки, не ориентир`);
   }
-  if (est.market) lines.push(`📊 Наша база (${est.market.label}, ${est.market.grade}): ${fmt(est.market.refMedian)} по ${est.market.refSource === 'sold' ? `${est.market.soldN} продажам` : `${est.market.n} лотам`}${est.market.refSource !== 'sold' && est.market.soldN ? `, продаж ${est.market.soldN}` : ''}`);
-  else lines.push('📊 Наша база: похожих лотов в этом состоянии ещё не было');
+  if (est.market) {
+    const m = est.market;
+    const recent = est.referenceRecent ? `${fmt(m.recentMedian)} по ${m.recentN} продажам за 12 мес. — основной ориентир` : null;
+    lines.push(`📊 Наша база (${m.label}, ${m.grade}): ${recent || `${fmt(m.refMedian)} по ${m.refSource === 'sold' ? `${m.soldN} продажам` : `${m.n} лотам`}${m.refSource !== 'sold' && m.soldN ? `, продаж ${m.soldN}` : ''}`}`);
+  } else if (est.slabDetails) {
+    lines.push('📊 Слаб с пометкой details (чистка, повреждения) — с обычными не сравнивается');
+  } else lines.push(`📊 Наша база: похожих лотов ${est.slab && est.slab.bucket ? `в слабе ${est.slab.bucket}` : 'в этом состоянии'} ещё не было`);
   if (est.rarity) lines.push(`💎 Редкость: ${est.rarity.name} ${est.rarity.emoji}${est.rarity.reason ? ` · ${est.rarity.reason}` : ''}`);
   if (est.metal) {
     const m = est.metal;
-    lines.push(`⚖️ Металл: ${String(m.grams).replace('.', ',')} г ${m.metal === 'gold' ? 'золота' : 'серебра'} ≈ ${fmt(m.value)}${m.pricePerG ? ` (НБРБ ${String(m.pricePerG).replace('.', ',')} р./г)` : ''}`);
+    const what = `${String(m.grams).replace('.', ',')} г ${m.metal === 'gold' ? 'золота' : 'серебра'}`;
+    const bulk = m.bulk ? `вес лота ${String(m.bulk.grams).replace('.', ',')} г × проба ${String(m.bulk.purity).replace('.', ',')}${m.bulk.purityAssumed ? ' (не указана, считаем билон)' : ''} = ` : '';
+    const basis = m.basis ? ` — ${m.basis}` : '';
+    lines.push(`⚖️ Металл: ${bulk}${what}${basis} ≈ ${fmt(m.value)}${m.pricePerG ? ` (НБРБ ${String(m.pricePerG).replace('.', ',')} р./г)` : ''}`);
   }
   if (est.metal && est.metal.below) {
     lines.push(`🟢 На ${fmt(est.metal.gain)} ниже стоимости металла — выгодно при любом состоянии`);
+  } else if (est.slabCheap) {
+    lines.push(`⚪ Слаб дешёвой монеты: ориентир ${fmt(est.reference)} меньше ${fmt(SLAB_MIN_BYN)} — это в основном цена слабирования`);
   } else if (est.deviationPct != null) {
     const base = est.referenceSource === 'market' ? 'нашей базы' : srcName(est.referenceSource).split(',')[0];
     if (est.isBargain) lines.push(`🟢 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base} — выгодно`);
@@ -192,4 +297,8 @@ function formatEstimateLines(est) {
   return lines;
 }
 
-module.exports = { assess, isBargain, rarityTier, marketEstimate, catalogPrice, usablePrice, formatEstimateLines, median, BARGAIN_PCT, BARGAIN_BYN, BARGAIN_MIN_BYN, MIN_SAMPLES, TIERS, SUSPECT_MIN_REF, SUSPECT_SHARE };
+module.exports = {
+  assess, isBargain, rarityTier, marketEstimate, catalogPrice, usablePrice, formatEstimateLines, median, quietLot, periodLabel,
+  BARGAIN_PCT, BARGAIN_BYN, BARGAIN_MIN_BYN, MIN_SAMPLES, TIERS, SUSPECT_MIN_REF, SUSPECT_SHARE, SLAB_MIN_BYN,
+  QUIET_HOURS, QUIET_MAX_BIDS, QUIET_MIN_REF,
+};

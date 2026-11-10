@@ -40,13 +40,82 @@ const GOLD = [
   [1000, 1975, 1982, 7.74],  // червонец «Сеятель» 1975–1982
 ];
 
-// { metal: 'silver'|'gold', grams } или null, если монета не из драгметалла или стандарт неизвестен
+// Памятные СССР 1977–1991, России и Беларуси после 1991: у одного номинала бывают разные веса — берётся меньший
+// из ходовых (это нижняя планка). Точнее — по тексту лота (parse.contentFrom), он важнее этой таблицы.
+// [номинал в копейках, год от, год до, грамм чистого металла]
+const MODERN_SILVER = [
+  [300, 1987, 2100, 31.1],   // 3 рубля: СССР 1987–1991 и Россия 34,56–34,88 г 900
+  [500, 1977, 1980, 15.0],   // 5 рублей Олимпиада-80: 16,67 г 900
+  [500, 1988, 1991, 31.1],   // 5 рублей СССР 1988–1991: 34,56 г 900
+  [1000, 1977, 1980, 30.0],  // 10 рублей Олимпиада-80: 33,3 г 900
+  [1000, 1992, 2100, 15.5],  // 10 рублей НБРБ: 16,81 г 925 (бывают и 33,62 г)
+  [2000, 1992, 2100, 26.1],  // 20 рублей НБРБ: 28,28 г 925 (чаще 33,62 г)
+];
+const MODERN_GOLD = [
+  [2500, 1992, 2100, 3.1],   // 25 рублей: 3,11 г 999
+  [5000, 1977, 2100, 7.7],   // 50 рублей: СССР 8,64 г 900, «Победоносец» 7,78 г 999
+  [10000, 1977, 2100, 15.5], // 100 рублей: 17,28 г 900 / 15,55 г 999
+];
+// Германия 1871–1945 по ключу номинала parse.foreignFrom: [номинал, год от, год до, металл, грамм]
+const GERMAN = [
+  [0.5, 1905, 1919, 'silver', 2.5], [1, 1873, 1916, 'silver', 5.0], [2, 1876, 1915, 'silver', 10.0], [3, 1908, 1918, 'silver', 15.0],
+  [5, 1874, 1915, 'silver', 25.0], [1, 1925, 1927, 'silver', 2.5], [2, 1925, 1939, 'silver', 5.0], [3, 1924, 1933, 'silver', 7.5],
+  [5, 1925, 1939, 'silver', 12.5], [10, 1871, 1915, 'gold', 3.58], [20, 1871, 1915, 'gold', 7.17],
+];
+// Иностранные монеты (parse.worldFrom): [страна или null — любая, единица, номинал, год от, год до, металл, грамм].
+// Применяется только если металл монеты уже известен (поле «Металл» ay.by или заголовок): «20 лир» 1970-х — не золото.
+const WORLD = [
+  ['США', 'доллар', 1, 1878, 1935, 'silver', 24.06], ['США', 'доллар', 1, 1986, 2100, 'silver', 31.1], // Морган/Пис; Silver Eagle
+  ['США', 'цент', 50, 1892, 1964, 'silver', 11.25], ['США', 'цент', 50, 1965, 1970, 'silver', 4.6],
+  ['США', 'цент', 25, 1892, 1964, 'silver', 5.62], ['США', 'цент', 10, 1892, 1964, 'silver', 2.25],
+  ['США', 'доллар', 20, 1850, 1933, 'gold', 30.09], ['США', 'доллар', 10, 1838, 1933, 'gold', 15.04],
+  ['США', 'доллар', 5, 1839, 1929, 'gold', 7.52], ['США', 'доллар', 2.5, 1840, 1929, 'gold', 3.76],
+  ['Польша', 'злотый', 10, 1932, 1939, 'silver', 16.5], ['Польша', 'злотый', 5, 1932, 1938, 'silver', 8.25], ['Польша', 'злотый', 2, 1932, 1936, 'silver', 3.3],
+  [null, 'соверен', 1, 1817, 2100, 'gold', 7.32], [null, 'соверен', 0.5, 1817, 2100, 'gold', 3.66],
+  [null, 'франк', 20, 1803, 1936, 'gold', 5.8], [null, 'франк', 10, 1850, 1914, 'gold', 2.9], [null, 'лира', 20, 1861, 1927, 'gold', 5.8],
+  [null, 'гульден', 10, 1875, 1933, 'gold', 6.05], [null, 'дукат', 1, 1600, 1915, 'gold', 3.44], [null, 'дукат', 4, 1600, 1915, 'gold', 13.76],
+  [null, 'крона', 100, 1908, 1915, 'gold', 30.48], [null, 'крона', 20, 1873, 1931, 'gold', 6.09], [null, 'крона', 10, 1873, 1917, 'gold', 3.04],
+  [null, 'песо', 50, 1921, 1947, 'gold', 37.5], [null, 'песо', 20, 1917, 1959, 'gold', 15.0], [null, 'песо', 10, 1905, 1959, 'gold', 7.5],
+  [null, 'песо', 5, 1905, 1955, 'gold', 3.75], [null, 'песо', 2.5, 1918, 1948, 'gold', 1.87], [null, 'песо', 2, 1919, 1948, 'gold', 1.5],
+  [null, 'крюгерранд', 1, 1967, 2100, 'gold', 31.1],
+];
+
+const byDenom = (table, p) => table.find(([d, from, to]) => d === p.denomKop && p.year >= from && p.year <= to);
+
+// { metal: 'silver'|'gold', grams, basis? } или null, если монета не из драгметалла или стандарт неизвестен.
+// Лот на вес («Серебро 500 гр», parse.weightFrom): чистое серебро = вес × проба, bulk — из чего посчитано.
+// Порядок: таблицы Империи/СССР до 1931 (стандарт чеканки) → марки Германии и иностранные → текст лота
+// (унции, вес × проба) → современные памятные (нижняя планка по номиналу).
 function fineContent(parsed) {
-  if (!parsed || parsed.denomKop == null || !parsed.year) return null;
-  const table = parsed.metal === 'gold' ? GOLD : parsed.metal === 'silver' ? SILVER : null;
-  if (!table) return null;
-  const row = table.find(([d, from, to]) => d === parsed.denomKop && parsed.year >= from && parsed.year <= to);
-  return row ? { metal: parsed.metal, grams: row[3] } : null;
+  if (parsed && parsed.weight && parsed.weight.fineGrams > 0) {
+    const w = parsed.weight;
+    return { metal: 'silver', grams: w.fineGrams, bulk: { grams: w.grams, purity: w.purity, purityAssumed: w.purityAssumed } };
+  }
+  if (!parsed || (parsed.metal !== 'silver' && parsed.metal !== 'gold')) return null;
+  const gold = parsed.metal === 'gold';
+  if (parsed.denomKop != null && parsed.year) {
+    const row = byDenom(gold ? GOLD : SILVER, parsed);
+    if (row) return { metal: parsed.metal, grams: row[3] };
+  }
+  const f = parsed.foreign;
+  if (f && f.unit === 'марка' && parsed.year) {
+    const row = GERMAN.find(([v, from, to, m]) => v === f.value && parsed.year >= from && parsed.year <= to && m === parsed.metal);
+    if (row) return { metal: parsed.metal, grams: row[4] };
+  }
+  const w = parsed.world;
+  if (w) {
+    const row = WORLD.find(([c, u, v, from, to, m]) => u === w.unit && v === w.value && m === parsed.metal && (!c || c === w.country)
+      && (!parsed.year || (parsed.year >= from && parsed.year <= to)) && (parsed.year || c === null));
+    if (row) return { metal: parsed.metal, grams: row[6] };
+  }
+  if (parsed.content && parsed.content.fineGrams > 0) return { metal: parsed.metal, grams: parsed.content.fineGrams, basis: parsed.content.basis };
+  if (parsed.denomKop != null) {
+    // без года («Белая синица. 10 рублей. Серебро.») — наименьший вес номинала за все годы
+    const table = gold ? MODERN_GOLD : MODERN_SILVER;
+    const rows = parsed.year ? [byDenom(table, parsed)].filter(Boolean) : table.filter(([d]) => d === parsed.denomKop);
+    if (rows.length) return { metal: parsed.metal, grams: Math.min(...rows.map((r) => r[3])), basis: 'наименьший из ходовых весов этого номинала' };
+  }
+  return null;
 }
 
 // { metal, grams, pricePerG, value } — стоимость металла в BYN; null, если содержание или цена неизвестны
@@ -65,4 +134,4 @@ async function metalValueLive(parsed) {
   return metalValue(parsed, prices);
 }
 
-module.exports = { fineContent, metalValue, metalValueLive, SILVER, GOLD };
+module.exports = { fineContent, metalValue, metalValueLive, SILVER, GOLD, MODERN_SILVER, MODERN_GOLD, GERMAN, WORLD };

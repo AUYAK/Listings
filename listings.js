@@ -3,32 +3,46 @@ const { chromium } = require('playwright');
 const store = require('./store');
 // Этот процесс ведёт только мониторы Kufar; площадки с другим source (ay.by → coins.js) живут отдельно
 const MONITORS = require('./config').MONITORS.filter((m) => !m.source || m.source === 'kufar');
-const { parseCoin } = require('./coins/parse');
+const { parseCoin, notifyBlocker, collectionHint } = require('./coins/parse');
 const cstore = require('./coins/store');
 const cmarket = require('./coins/market');
 const numista = require('./coins/numista');
 const tg = require('./telegram');
 const { metalValueLive } = require('./coins/metal');
 
-// Мониторы с domain='coins' (Kufar): каждое объявление разбирается и сохраняется в coin_lots,
-// уведомление — только серебро без копий/подборок и только при выгоде (ниже каталога или нашей оценки
-// на BARGAIN_PCT). Возвращает { notify, reason, lines }.
+// Мониторы с domain='coins' (Kufar): каждое объявление разбирается и сохраняется в coin_lots. Уведомления:
+//  1) серебро и золото без копий/подборок (лот серебра на вес — можно, его оценивает металл), только при выгоде
+//     (ниже каталога или нашей оценки на BARGAIN_PCT). Состояния у Kufar нет: если его нет и в заголовке, ориентир
+//     считается по F — нижняя оценка, «50 копеек 1925 за 30 р.» всё равно выгодно, а за 100 р. — нет.
+//     Слабы по фиксированной цене не шлём: такие цены завышены, а подделки слабов обычны;
+//  2) коллекции, альбомы, россыпь, наследство (parse.collectionHint) — любая цена до KUFAR_LOTS_MAX_BYN:
+//     оценить можно только по фото, а именно так продают монеты те, кто не знает им цену.
+// Возвращает { notify, reason, lines }.
+const ASSUMED_GRADE = 'F';
+const LOTS_MAX_BYN = parseFloat(process.env.KUFAR_LOTS_MAX_BYN || '0'); // 0 — без ограничения
 let coinRowsCache = { at: 0, rows: [] };
 async function assessCoinListing(listingId, listing) {
   const parsed = parseCoin({ title: listing.title, sectionPath: null, description: listing.params });
   const price = extractPriceFromStr(listing.price, 'р.');
   await cstore.upsertKufarLot(listingId, parsed, price).catch((err) => console.warn(`  [Coins] save failed: ${err.message}`));
+  const lot = collectionHint(listing.title, listing.params);
+  if (lot && !parsed.flags.includes('копия') && !(LOTS_MAX_BYN > 0 && price > LOTS_MAX_BYN)) {
+    return { notify: true, lines: [`🧺 Похоже на коллекцию / россыпь (${lot}) — оценить по фото: ориентира у бота нет`] };
+  }
   if (!parsed.isPrecious) return { notify: false, reason: 'не серебро и не золото' };
-  if (parsed.flags.includes('копия') || parsed.flags.includes('несколько монет')) return { notify: false, reason: parsed.flags.join(', ') };
+  const blocker = notifyBlocker(parsed, 'fixed');
+  if (blocker) return { notify: false, reason: blocker };
   if (Date.now() - coinRowsCache.at > 5 * 60e3) coinRowsCache = { at: Date.now(), rows: await cstore.getCoinRows(null).catch(() => []) };
   // источники в карточке раздельно; ориентир — самый низкий с точным состоянием; металл — нижняя планка
   const { catalogs, type } = await cstore.getCatalogs(parsed).catch(() => ({ catalogs: [], type: null }));
   if (!catalogs.some((c) => c.source === 'numista')) { const n = await numista.lookup(parsed).catch(() => null); if (n) catalogs.push(n); }
   const metal = await metalValueLive(parsed).catch(() => null);
-  const est = cmarket.assess({ parsed, price, rows: coinRowsCache.rows, excludeId: listingId, catalogs, coinType: type, metal, fixedPrice: true });
+  const forAssess = parsed.grade || parsed.slab ? parsed : { ...parsed, grade: ASSUMED_GRADE };
+  const est = cmarket.assess({ parsed: forAssess, price, rows: coinRowsCache.rows, excludeId: listingId, catalogs, coinType: type, metal, fixedPrice: true });
   await cstore.saveEstimate(listingId, est).catch(() => {});
   const coinLine = [parsed.denomination, parsed.year, parsed.mintmaster || parsed.mint, parsed.ruler, parsed.isGold ? 'золото' : 'серебро'].filter(Boolean).join(' · ');
-  const lines = [`🔎 ${coinLine}`, parsed.grade ? `🏷 Состояние (из заголовка): ${parsed.grade}` : null, ...cmarket.formatEstimateLines(est)].filter(Boolean);
+  const gradeLine = parsed.grade ? `🏷 Состояние (из заголовка): ${parsed.grade}` : parsed.slab ? null : `🏷 Состояние не указано — ориентир по ${ASSUMED_GRADE} (нижняя оценка), смотрите фото`;
+  const lines = [`🔎 ${coinLine}`, gradeLine, ...cmarket.formatEstimateLines(est)].filter(Boolean);
   if (!est.isBargain) return { notify: false, reason: est.deviationPct == null ? 'нет ориентира' : `${est.deviationPct}% к ${est.referenceSource}`, lines };
   return { notify: true, lines };
 }

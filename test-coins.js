@@ -277,18 +277,29 @@ check('выгода: 50 р. с дорогого лота достаточно, 3
 
 console.log('архив проходов gdenashel.ru:');
 const gd = require('./coins/gdenashel');
-check('состояния источника → наша шкала', () => {
-  assert.strictEqual(gd.normalizeGrade('MS64'), 'MS64+'); // слабы от MS64 — отдельно от «просто UNC»
-  assert.strictEqual(gd.normalizeGrade('MS67'), 'MS64+');
-  assert.strictEqual(gd.normalizeGrade('MS63'), 'UNC');
-  assert.strictEqual(gd.normalizeGrade('MS 65'), 'MS64+');
+check('состояния источника → наша шкала: числовой грейд — корзина слаба, буквенный — сырая монета', () => {
+  assert.strictEqual(gd.normalizeGrade('MS64'), 'MS64');
+  assert.strictEqual(gd.normalizeGrade('MS67'), 'MS66+');
+  assert.strictEqual(gd.normalizeGrade('MS63'), 'MS63');
+  assert.strictEqual(gd.normalizeGrade('MS61'), 'MS60-62');
+  assert.strictEqual(gd.normalizeGrade('MS 65'), 'MS65');
+  assert.strictEqual(gd.normalizeGrade('MS62BN'), 'MS60-62');
   assert.strictEqual(gd.normalizeGrade('UNC'), 'UNC');
-  assert.strictEqual(gd.normalizeGrade('AU58'), 'AU');
+  assert.strictEqual(gd.normalizeGrade('UNC PL'), 'UNC');
+  assert.strictEqual(gd.normalizeGrade('AU58'), 'AU50-58');
+  assert.strictEqual(gd.normalizeGrade('AU-58'), 'AU50-58');
+  assert.strictEqual(gd.normalizeGrade('AU'), 'AU');
+  assert.strictEqual(gd.normalizeGrade('AU DETAILS'), null); // проблемный слаб — не в ориентир
   assert.strictEqual(gd.normalizeGrade('XF'), 'XF');
-  assert.strictEqual(gd.normalizeGrade('VF25'), 'VF');
-  assert.strictEqual(gd.normalizeGrade('F15'), 'F');
+  assert.strictEqual(gd.normalizeGrade('XF45'), 'XF40-45');
+  assert.strictEqual(gd.normalizeGrade('VF25'), 'VF20-35');
+  assert.strictEqual(gd.normalizeGrade('F15'), 'F12-15');
   assert.strictEqual(gd.normalizeGrade('PROOF'), 'PF');
-  assert.strictEqual(gd.normalizeGrade('PF63'), 'PF');
+  assert.strictEqual(gd.normalizeGrade('PF63'), 'PF60-64');
+  assert.strictEqual(gd.normalizeGrade('PF69'), 'PF68+');
+  assert.strictEqual(gd.normalizeGrade('PF55'), 'PF');  // вне корзин — буквенное состояние, а не потеря прохода
+  assert.strictEqual(gd.normalizeGrade('AU45'), 'AU');
+  assert.strictEqual(gd.normalizeGrade('VF10'), 'VF');
   assert.strictEqual(gd.normalizeGrade(''), null);
 });
 check('страница номинала: монета, буквы, разновидность, ссылка на проходы', () => {
@@ -339,7 +350,7 @@ check('страница проходов: дата, дом, состояние, 
   assert.strictEqual(r.sales.length, 2);
   assert.deepStrictEqual(r.sales[0], { saleId: '11111111-1111-1111-1111-111111111111', title: '1 рубль 1895 года', soldOn: '2025-01-29', house: 'Конрос Аукцион 1 Лот №22', gradeRaw: 'VF', grade: 'VF', slab: null, priceRub: 16500, photos: ['https://gdenashel.ru/storage/resized/200x/sale/a/11111111-1111-1111-1111-111111111111-1.jpg', 'https://gdenashel.ru/storage/resized/200x/sale/a/11111111-1111-1111-1111-111111111111-2.jpg'] });
   assert.strictEqual(r.sales[1].priceRub, null);
-  assert.strictEqual(r.sales[1].grade, 'MS64+');
+  assert.strictEqual(r.sales[1].grade, 'MS64');
   assert.strictEqual(r.sales[1].slab, 'ННР');
 });
 
@@ -483,6 +494,304 @@ check('снайп: разбор ответа в Telegram', () => {
   assert.strictEqual(parseBidReply('спасибо'), null);
   assert.strictEqual(parseBidReply('1898 АГ хорошая'), null);
   assert.strictEqual(parseBidReply(''), null);
+});
+
+console.log('слабы, лоты на вес, марки:');
+const { slabFrom, weightFrom } = require('./coins/parse');
+check('слаб: фирма и корзина грейда из заголовков ay.by', () => {
+  const b = (t) => { const s = slabFrom(t); return s && `${s.company}|${s.bucket}`; };
+  assert.strictEqual(b('5 рублей 1902 АР, Николай II. В слабе NGC MS65'), 'NGC|MS65');
+  assert.strictEqual(b('1 рубль 1924 MS-64 NGC'), 'NGC|MS64');
+  assert.strictEqual(b('3 марки 1911 Вюртемберг - свадьба - ms 66 ННР - патина!'), 'ННР|MS66+');
+  assert.strictEqual(b('10 рублей 1903г.  NGC  AU-58'), 'NGC|AU50-58');
+  assert.strictEqual(b('Германия 5 марок 1934 года. Буква F. Шиллер. Состояние aUNC. В слабе NGC 58'), 'NGC|AU50-58'); // только число
+  assert.strictEqual(b('10 долларов 1910 США Слаб PCGC=MS61="Индеец"'), 'PCGS|MS60-62'); // опечатка в фирме
+  assert.strictEqual(b('Полтинник 1924 ПЛ МС-64 слаб'), 'null|MS64'); // кириллическое «МС»
+  assert.strictEqual(b('2 копейки 1974 в слабе ННР PL 64'), 'ННР|MS64'); // PL из банковских наборов
+  assert.strictEqual(b('Польша. 200 злотых 1983 года MW "Ян Собесский" слаб NCG PR69 ULTRA CAMEO'), 'NGC|PF68+');
+  assert.strictEqual(b('Доллар Моргана 1880. Крупное серебро! Слаб NGC!'), 'NGC|null'); // слаб без грейда
+  const det = slabFrom('5 копеек 1971 UNC DET в мини-слабе ННР');
+  assert.ok(det.details && det.bucket === null);
+  // не слабы
+  assert.strictEqual(slabFrom('5 марок 1898 Саксония. Монета уровня MS-61. Вынута из слаба RNGA'), null);
+  assert.strictEqual(slabFrom('15 копеек 1915 слабый чекан'), null);
+  assert.strictEqual(slabFrom('1 рубль 1898 АГ'), null);
+  assert.strictEqual(slabFrom('1 рубль 1898 АГ', 'Монета не в слабе, можно слабировать'), null);
+  assert.strictEqual(slabFrom('5 рублей 1902', 'Монета в слабе NGC MS64').bucket, 'MS64'); // описание: фирма + грейд
+  assert.ok(!parseCoin({ title: '15 копеек 1915 слабый чекан', sectionPath: null }).flags.includes('слаб'));
+  assert.ok(parseCoin({ title: '1 рубль 1924 MS-64 NGC', sectionPath: null }).flags.includes('слаб'));
+  // «из набора» — одна монета, не подборка
+  assert.ok(!parseCoin({ title: '10 копеек 1974 ННР PL 63 из набора ГБ СССР', sectionPath: null }).flags.includes('несколько монет'));
+});
+check('лот на вес: серебро по весу и пробе, вес одной монеты и год — не вес лота', () => {
+  const w = (t, d = '') => parseCoin({ title: t, sectionPath: null, description: d }).weight;
+  assert.deepStrictEqual(w('Серебро 500 гр'), { grams: 500, purity: 0.5, purityAssumed: true, fineGrams: 250 });
+  assert.deepStrictEqual(w('Лом серебра 875 пр. 100 г'), { grams: 100, purity: 0.875, purityAssumed: false, fineGrams: 87.5 });
+  assert.strictEqual(w('Набор 10 монет, серебро 900, общий вес 100 гр').fineGrams, 90);
+  assert.strictEqual(w('Серебряные монеты 1 кг').grams, 1000);
+  assert.strictEqual(w('Лом серебра', 'Общий вес 34,5 г, проба 875').fineGrams, 30.2);
+  assert.strictEqual(w('1 рубль 1898 АГ серебро 20 г'), null);          // одна монета
+  assert.strictEqual(w('20 копеек 1925 г серебро'), null);              // «1925 г» — год
+  assert.strictEqual(w('Монеты мира 4 кг., без СССР'), null);           // не серебро
+  const p = parseCoin({ title: 'Набор 10 монет, серебро 900, общий вес 100 гр', sectionPath: null });
+  assert.strictEqual(p.metal, 'silver');
+  assert.ok(p.flags.includes('несколько монет')); // подборка, но с весом серебра — её оценивает металл
+  assert.strictEqual(weightFrom('Серебро 925', '', { denomKop: null }), null); // веса нет
+});
+check('Германия: марки, буква двора, земля, металл; нотгельды и марки почты — не монеты', () => {
+  const p = parseCoin({ title: '3 марки 1911 A Пруссия. Университет Бреслау', sectionPath: null });
+  assert.deepStrictEqual(p.foreign, { unit: 'марка', value: 3, key: 'M3', mint: 'A', state: 'Пруссия' });
+  assert.strictEqual(p.metal, 'silver');
+  assert.strictEqual(p.denomination, '3 марки');
+  assert.deepStrictEqual(groupKeys(p).map((k) => k.key), ['M3|1911|A|Пруссия', 'M3|1911|A', 'M3|1911']);
+  assert.strictEqual(parseCoin({ title: 'С рубля без мц! 2 марки 1911 Луитпольд Баварский - блеск!', sectionPath: null }).foreign.state, 'Бавария');
+  assert.strictEqual(parseCoin({ title: '5 марок 1934 года. Буква F. Шиллер', sectionPath: 'Монеты › Европа › Германия › 1919-1945' }).foreign.mint, 'F');
+  assert.strictEqual(parseCoin({ title: 'Германия 25 пфеннигов 1910 год, " F ", Раскол штемпеля', sectionPath: null }).foreign.mint, 'F');
+  assert.strictEqual(parseCoin({ title: '2 рейхс марки 1926 год. F .Серебро .С рубля', sectionPath: 'Монеты › Европа › Германия' }).foreign.mint, 'F');
+  assert.strictEqual(parseCoin({ title: '1 марка 1914 год.Серебро .С рубля', sectionPath: 'Монеты › Европа › Германия' }).foreign.mint, null);
+  assert.strictEqual(parseCoin({ title: '20 марок 1913 A Пруссия', sectionPath: null }).metal, 'gold');
+  assert.strictEqual(parseCoin({ title: '1 рейхсмарка 1937 A Германия', sectionPath: null }).metal, null); // 1933–1939 — никель
+  assert.strictEqual(parseCoin({ title: 'Германия. 3 рейх марки 1928 D. слаб CPRC MS63', sectionPath: null }).foreign.key, 'M3');
+  assert.strictEqual(parseCoin({ title: 'Нотгельд 50 пфеннигов 1921 год Ганновер. Веймарская республика', sectionPath: null }).foreign, null);
+  assert.strictEqual(parseCoin({ title: 'Беляев в космосе! СССР 1965 год 1 марка', sectionPath: null }).foreign, null);
+  assert.strictEqual(parseCoin({ title: '1 марка 1914 D MS-67 PCGS', sectionPath: null }).foreign, null); // без Германии в заголовке и разделе
+  assert.strictEqual(parseCoin({ title: '1 марка 1914 D MS-67 PCGS', sectionPath: 'Монеты › Европа › Германия › 1871-1918' }).foreign.mint, 'D');
+});
+check('«без МЦ» из заголовка', () => {
+  const f = (t) => parseCoin({ title: t, sectionPath: null }).noReserve;
+  assert.strictEqual(f('5 копеек 1852 года (Е.М.). СОСТОЯНИЕ! Старт с 1 рубля!!! Без МЦ.'), true);
+  assert.strictEqual(f('1 рубль 2013г. Аукцион 5 дней с 1 рубля без мнц.'), true);
+  assert.strictEqual(f('2 марки 1901 Любек. АУКЦИОН С 1 РУБЛЯ БЕЗ МПЦ!!!'), true);
+  assert.strictEqual(f('Америго Веспуччи 20 рублей 2010. С 1 рубля, Без мин.цены!'), true);
+  assert.strictEqual(f('Турция 5 лир, 1975. С 20 копеек. Распродажа коллекции.'), false);
+  assert.strictEqual(f('20 копеек 1925 без минусов'), false);
+});
+check('ревью: номинал после фирмы — не грейд; одна монета и ложка — не лот на вес; общее правило отсева', () => {
+  const { notifyBlocker } = require('./coins/parse');
+  assert.strictEqual(slabFrom('NGC 15 копеек 1915 ВС').bucket, null);
+  assert.strictEqual(slabFrom('Слаб ННР 20 копеек 1923').bucket, null);
+  assert.strictEqual(slabFrom('PCGS 50 копеек 1924 ПЛ UNC').bucket, null);
+  assert.strictEqual(slabFrom('PCGS 63 50 копеек 1924').bucket, 'MS63');
+  assert.strictEqual(parseCoin({ title: '2 марки 1876 A Пруссия серебро 11,1 г', sectionPath: null }).weight, null);
+  assert.strictEqual(parseCoin({ title: 'Ложка серебро 875 пр. 50 г', sectionPath: null }).weight, null);
+  assert.strictEqual(parseCoin({ title: 'Множество монет серебро 500 гр', sectionPath: null }).weight.grams, 500); // «нож» внутри слова — не ложка
+  const p = (t) => parseCoin({ title: t, sectionPath: null });
+  assert.strictEqual(notifyBlocker(p('1 рубль 1912 копия'), 'auction'), 'копия');
+  assert.strictEqual(notifyBlocker(p('Набор 10 шт 20 копеек 1925'), 'auction'), 'подборка / несколько монет');
+  assert.strictEqual(notifyBlocker(p('Набор 10 монет, серебро 900, общий вес 100 гр'), 'auction'), null);
+  assert.ok(notifyBlocker(p('1 рубль 1924 MS-64 NGC'), 'buy_now'));
+  assert.ok(notifyBlocker(p('1 рубль 1924 MS-64 NGC'), 'fixed'));
+  assert.strictEqual(notifyBlocker(p('1 рубль 1924 MS-64 NGC'), 'auction_buynow'), null);
+  // фильтр монитора СССР 1961–1991 UNC
+  const f = require('./config').MONITORS.find((m) => m.key === 'coins-ussr-unc').titleFilter;
+  assert.strictEqual(f.test('15 копеек 1980 UNC #1 Супер!'), true);
+  assert.strictEqual(f.test('3 копейки 1977 aUNC #K'), true);
+  assert.strictEqual(f.test('50 копеек 1990 Люкс!'), true);
+  assert.strictEqual(f.test('20 копеек 1966 MS-64 в мини-слабе ННР'), true);
+  assert.strictEqual(f.test('1 рубль 1970 штемпельный блеск'), true);
+  assert.strictEqual(f.test('20 копеек 1961 штемпель 1.2'), false);
+  assert.strictEqual(f.test('5 копеек 1961 слабый удар'), false);
+  assert.strictEqual(f.test('10 копеек 1975'), false);
+});
+check('ревью: свежие продажи «за правление» не заменяют цену года; одна продажа из двух мониторов — один раз', () => {
+  const p = parseCoin({ title: '1 рубль 1899', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
+  const day = (n) => new Date(Date.now() - n * 86400e3);
+  const sold = (title, price, o = {}) => ({ id: Math.random(), source: 'ayby', external_id: o.ext ?? String(Math.random()), sale_type: 'auction', grade: 'VF', current_price: price, final_price: price, outcome: o.outcome ?? 'sold', ended_at: day(10), title, parsed: parseCoin({ title, sectionPath: 'Серебро' }) });
+  const otherYears = [sold('1 рубль 1897', 500), sold('1 рубль 1898', 500), sold('1 рубль 1900', 500)];
+  const e = cm.assess({ parsed: p, price: 300, rows: otherYears, catalog: { source: 'gdenashel', prices: { VF: 250 } } });
+  assert.strictEqual(e.market.level, 'ruler');
+  assert.strictEqual(e.referenceRecent, false);
+  assert.strictEqual(e.reference, 250);
+  assert.strictEqual(e.isBargain, false);
+  // одна и та же продажа в двух мониторах (раздел и продавец) — один голос; копия без итога уступает копии с итогом
+  const dup = [sold('1 рубль 1899', 100, { ext: '501' }), sold('1 рубль 1899', 100, { ext: '501', outcome: null }), sold('1 рубль 1899', 300, { ext: '502' }), sold('1 рубль 1899', 300, { ext: '503' })];
+  const m = cm.marketEstimate(dup, p);
+  assert.strictEqual(m.n, 3);
+  assert.strictEqual(m.soldN, 3);
+  assert.strictEqual(m.refMedian, 300);
+});
+
+console.log('оценка слабов, свежих продаж, тихих лотов:');
+check('слаб: ориентир — слабы той же корзины, сырые и слабы в нашей базе не смешиваются', () => {
+  const ms64 = parseCoin({ title: '1 рубль 1924 MS-64 NGC', sectionPath: 'Серебро', conditionText: 'I (Новое, Unc)' });
+  const cat = { source: 'gdenashel', prices: { UNC: 204, MS63: 548, MS64: 447, MS65: 892 }, samples: { UNC: 36, MS64: 8 }, windowYears: 3, period: { from: '2022-01-10', to: '2025-10-30' } };
+  const e = cm.assess({ parsed: ms64, price: 300, rows: [], catalogs: [cat] });
+  assert.strictEqual(e.reference, 447);
+  assert.strictEqual(e.catalog.grade, 'MS64');
+  assert.strictEqual(e.isBargain, true); // 300 при 447: −33%, 147 р.
+  assert.ok(cm.formatEstimateLines(e).includes('📚 gdenashel.ru, аукционы РФ (слаб MS64, 8 прох., 2022–2025): 447 р.'), cm.formatEstimateLines(e).join('\n'));
+  // в нашей базе: три сырых UNC по 200 и три слаба MS64 по 600 — для слаба считаются только слабы, для сырой — только сырые
+  const r = (t, cond, price) => ({ id: Math.random(), source: 'ayby', sale_type: 'buy_now', grade: 'UNC', current_price: price, outcome: null, title: t, parsed: parseCoin({ title: t, sectionPath: 'Серебро', conditionText: cond }) });
+  const base = [r('1 рубль 1924', 'I (Новое, Unc)', 200), r('1 рубль 1924', 'I (Новое, Unc)', 210), r('1 рубль 1924', 'I (Новое, Unc)', 190),
+    r('1 рубль 1924 NGC MS64', 'I (Новое, Unc)', 600), r('1 рубль 1924 MS-64 ННР', 'I (Новое, Unc)', 620), r('1 рубль 1924 слаб NGC MS 64', 'I (Новое, Unc)', 580)];
+  assert.strictEqual(cm.marketEstimate(base, ms64).refMedian, 600);
+  assert.strictEqual(cm.marketEstimate(base, parseCoin({ title: '1 рубль 1924', sectionPath: 'Серебро', conditionText: 'I (Новое, Unc)' })).refMedian, 200);
+  // старые строки базы без поля slab: слаб восстанавливается по заголовку
+  const legacy = base.map((x) => ({ ...x, parsed: { ...x.parsed, slab: undefined } }));
+  assert.strictEqual(cm.marketEstimate(legacy, ms64).refMedian, 600);
+  // нижняя корзина без слабов в архиве → сырая монета того же уровня
+  const ms61 = parseCoin({ title: '1 рубль 1924 NGC MS61', sectionPath: 'Серебро', conditionText: 'I (Новое, Unc)' });
+  const low = cm.assess({ parsed: ms61, price: 100, rows: [], catalogs: [{ source: 'gdenashel', prices: { UNC: 204 }, samples: { UNC: 36 } }] });
+  assert.strictEqual(low.reference, 204);
+  assert.ok(cm.formatEstimateLines(low)[0].includes('UNC без слаба — слабов MS60-62 в архиве нет'));
+  // MS65 без слабов этой корзины — ориентира нет (сырая UNC его не заменяет)
+  const ms65 = cm.assess({ parsed: parseCoin({ title: '1 рубль 1924 MS-65 ННР', sectionPath: 'Серебро' }), price: 100, rows: [], catalogs: [{ source: 'gdenashel', prices: { UNC: 204 } }] });
+  assert.strictEqual(ms65.reference, null);
+  // слаб дешёвой монеты: ориентир < 60 р. — не выгодно, сколько бы ни стоил лот
+  const cheap = cm.assess({ parsed: parseCoin({ title: '15 копеек 1915 ВС MS-65 ННР', sectionPath: 'Серебро' }), price: 10, rows: [], catalogs: [{ source: 'gdenashel', prices: { MS65: 56 } }] });
+  assert.strictEqual(cheap.slabCheap, true);
+  assert.strictEqual(cheap.isBargain, false);
+  // details — не с чем сравнить
+  const det = cm.assess({ parsed: parseCoin({ title: 'Рубль 1913 NGC UNC det', sectionPath: 'Серебро', conditionText: 'I (Новое, Unc)' }), price: 100, rows: base, catalogs: [cat] });
+  assert.strictEqual(det.reference, null);
+  // слаб без грейда — как сырая монета того же состояния (слаб не дешевле сырой)
+  const nograde = cm.assess({ parsed: parseCoin({ title: '1 рубль 1924 UNC слаб ННР', sectionPath: 'Серебро', conditionText: 'I (Новое, Unc)' }), price: 100, rows: [], catalogs: [cat] });
+  assert.strictEqual(nograde.reference, 204);
+});
+check('свежие продажи нашей базы (12 мес., ≥3) — основной ориентир, даже если архив дешевле', () => {
+  const p = parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
+  const day = (n) => new Date(Date.now() - n * 86400e3);
+  const sold = (price, ago) => ({ id: Math.random(), source: 'ayby', sale_type: 'auction', grade: 'VF', current_price: price, final_price: price, outcome: 'sold', ended_at: day(ago), title: '1 рубль 1898 АГ', parsed: parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро' }) });
+  const recent = [sold(180, 10), sold(170, 40), sold(190, 100)];
+  const e = cm.assess({ parsed: p, price: 120, rows: recent, catalog: { source: 'gdenashel', prices: { VF: 150 } } });
+  assert.strictEqual(e.reference, 180);
+  assert.strictEqual(e.referenceRecent, true);
+  assert.ok(cm.formatEstimateLines(e).includes('📊 Наша база (1 рубль 1898 АГ, VF): 180 р. по 3 продажам за 12 мес. — основной ориентир'));
+  // старые продажи (больше года) — обычный порядок: самый низкий источник
+  const old = [sold(180, 400), sold(170, 500), sold(190, 600)];
+  const o = cm.assess({ parsed: p, price: 120, rows: old, catalog: { source: 'gdenashel', prices: { VF: 150 } } });
+  assert.strictEqual(o.reference, 150);
+  assert.strictEqual(o.referenceRecent, false);
+  assert.strictEqual(cm.periodLabel({ from: '2025-02-01', to: '2025-11-01' }), '2025');
+});
+check('лот на вес: стоимость серебра — ориентир, ниже неё — выгодно', () => {
+  const { metalValue } = require('./coins/metal');
+  const p = parseCoin({ title: 'Серебро 500 гр', sectionPath: null });
+  const m = metalValue(p, { silver: 4.5, gold: 360 });
+  assert.deepStrictEqual(m, { metal: 'silver', grams: 250, bulk: { grams: 500, purity: 0.5, purityAssumed: true }, pricePerG: 4.5, value: 1125 });
+  const e = cm.assess({ parsed: p, price: 700, rows: [], metal: m });
+  assert.strictEqual(e.isBargain, true);
+  assert.ok(cm.formatEstimateLines(e).includes('⚖️ Металл: вес лота 500 г × проба 0,5 (не указана, считаем билон) = 250 г серебра ≈ 1 125 р. (НБРБ 4,5 р./г)'), cm.formatEstimateLines(e).join('\n'));
+});
+check('тихий лот: аукцион без конкуренции за сутки до конца, разумный максимум', () => {
+  const p = parseCoin({ title: '1 рубль 1898 АГ. С 1 рубля без МЦ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
+  const est = cm.assess({ parsed: p, price: 1, rows: [], catalog: { source: 'gdenashel', prices: { VF: 150 } } });
+  assert.strictEqual(est.isBargain, false); // 1 р. без ставок — не цена
+  const now = Date.now();
+  const lot = (o) => ({ saleType: 'auction', price: 1, bids: 0, endsAt: new Date(now + 10 * 3600e3), reserve: null, ...o });
+  assert.deepStrictEqual(cm.quietLot(est, lot(), { now }), { ref: 150, max: 105, refSource: 'gdenashel', hoursLeft: 10 });
+  assert.ok(cm.quietLot(est, lot({ bids: 1, price: 60 }), { now }));
+  assert.strictEqual(cm.quietLot(est, lot({ bids: 2 }), { now }), null);                     // уже торгуются
+  assert.strictEqual(cm.quietLot(est, lot({ reserve: 'not_met' }), { now }), null);          // минимальная цена не пройдена
+  assert.strictEqual(cm.quietLot(est, lot({ endsAt: new Date(now + 40 * 3600e3) }), { now }), null); // рано
+  assert.strictEqual(cm.quietLot(est, lot({ saleType: 'buy_now' }), { now }), null);
+  assert.strictEqual(cm.quietLot(est, lot({ price: 120, bids: 1 }), { now }), null);         // уже дороже разумного максимума
+  const small = cm.assess({ parsed: p, price: 1, rows: [], catalog: { source: 'gdenashel', prices: { VF: 20 } } });
+  assert.strictEqual(cm.quietLot(small, lot(), { now }), null);                              // ориентир < 30 р.
+});
+check('монитор: тихое окно, слаб по фикс-цене, лот на вес, сбор цен без уведомлений', () => {
+  const { notifyTiming: nt, worthNotifying: wn, buildCaption, endsAtNight } = require('./coins');
+  const mon = { metals: ['silver'] };
+  const silver = parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null });
+  const h = (n) => new Date(Date.now() + n * 3600e3);
+  assert.strictEqual(nt(mon, silver, { ended: false, saleType: 'auction', endsAt: h(20) }), 'quiet');
+  assert.strictEqual(nt(mon, silver, { ended: false, saleType: 'auction', endsAt: h(30) }), 'closing');
+  const slab = parseCoin({ title: '1 рубль 1924 MS-64 NGC', sectionPath: null });
+  assert.strictEqual(wn(mon, slab, { ended: false, saleType: 'buy_now' }), false);
+  assert.strictEqual(wn(mon, slab, { ended: false, saleType: 'auction' }), true);
+  assert.strictEqual(wn(mon, parseCoin({ title: 'Набор 10 монет, серебро 900, общий вес 100 гр', sectionPath: null }), { ended: false, saleType: 'auction' }), true);
+  assert.strictEqual(wn(mon, parseCoin({ title: 'Набор 10 монет серебро 1924', sectionPath: null }), { ended: false, saleType: 'auction' }), false);
+  assert.strictEqual(wn({ ...mon, notify: false }, silver, { ended: false, saleType: 'auction' }), false);
+  assert.strictEqual(endsAtNight(new Date('2026-11-10T22:00:00Z')), true);  // 01:00 Минск
+  assert.strictEqual(endsAtNight(new Date('2026-11-10T12:00:00Z')), false); // 15:00 Минск
+  const lot = { title: '1 рубль 1924 MS-64 NGC', price: 1, bids: 0, saleType: 'auction', endsAt: new Date('2026-11-10T22:00:00Z'), url: 'https://ay.by/lot/x-1.html', photos: [], seller: 'Новичок', sellerRating: 3 };
+  const cap = buildCaption({ name: 'Монеты (серебро)', emoji: '🪙' }, lot, { ...slab, noReserve: true }, false, null, null, { ref: 447, max: 312 });
+  assert.ok(cap.includes('🤫 Тихий лот — Монеты (серебро)'), cap);
+  assert.ok(cap.includes('🏛 Слаб NGC MS64'), cap);
+  assert.ok(cap.includes('🤫 Тихий лот: ставок нет, без МЦ, заканчивается ночью. Разумный максимум ≈ 312 р. (ориентир 447 р. минус 30%)'), cap);
+  assert.ok(cap.includes('👤 Новичок, рейтинг 3 — ⚠️ мало отзывов, выше риск подделки (слабы тоже подделывают)'), cap);
+});
+check('страница лота: продавец с рейтингом, победитель, минимальная цена', () => {
+  const { interpretLot } = require('./coins/ayby');
+  const base = { title: '15 копеек 1921 РСФСР', timerSeconds: 3600, priceText: '100,00 руб.', bidsText: '2 ставки', hasBidButton: true, hasBuyNow: false, bargain: false, specs: {}, photos: [], titleAreaText: '', categoryPath: null,
+    seller: 'DimaMinsk', sellerNick: 'DimaMinsk', sellerId: '33853463', sellerRating: 241, winner: null, winnerId: null, reserveText: 'Минимальная цена не пройдена' };
+  const live = interpretLot(base);
+  assert.deepStrictEqual([live.seller, live.sellerId, live.sellerRating, live.reserve], ['DimaMinsk', '33853463', 241, 'not_met']);
+  assert.strictEqual(interpretLot({ ...base, reserveText: 'Минимальная цена пройдена' }).reserve, 'met');
+  assert.strictEqual(interpretLot({ ...base, reserveText: null }).reserve, null);
+  const sold = interpretLot({ ...base, timerSeconds: 0, reserveText: null, soldText: 'Лот продан за 2,50 бел. руб. 8 октября в 21:15:02, победитель Литовец', winner: 'Литовец', winnerId: '8923151' });
+  assert.deepStrictEqual([sold.sold, sold.winner, sold.winnerId], [true, 'Литовец', '8923151']);
+  assert.strictEqual(interpretLot({ ...base, timerSeconds: 0, soldText: 'Лот продан за 2,50 бел. руб. 8 октября в 21:15:02, победитель Литовец' }).winner, 'Литовец'); // без ссылки — из текста
+});
+
+console.log('серебро и золото всех стран, Kufar, лента ay.by:');
+check('содержание металла: таблицы стран, текст лота, памятные — нижняя планка', () => {
+  const { fineContent } = require('./coins/metal');
+  const fc = (title, sectionPath, specs = {}, description = '') => {
+    const r = fineContent(parseCoin({ title, sectionPath, specs, description }));
+    return r ? r.grams : null;
+  };
+  const S = { 'Металл': 'Серебро' }, G = { 'Металл': 'Золото' };
+  assert.strictEqual(fc('1 доллар 1921 Морган', 'Монеты › Америка', S), 24.06);
+  assert.strictEqual(fc('США 50 центов 1967 года . Кенеди.Серебро', 'Монеты › Америка США', { ...S, 'Номинал': '50 центов' }), 4.6);
+  assert.strictEqual(fc('С рубля! 1 доллар 2013 США - шагающая свобода - Унция серебра чистоты!', 'Монеты › Америка США', S), 31.1);
+  assert.strictEqual(fc('Соверен 1912 Георг V', 'Монеты › Европа', G), 7.32);
+  assert.strictEqual(fc('20 франков 1910 Франция', 'Монеты › Европа', G), 5.8);
+  assert.strictEqual(fc('5 марок 1936 A Гинденбург', 'Монеты › Европа › Германия', S), 12.5);
+  assert.strictEqual(fc('5 злотых 1934 Пилсудский', 'Монеты › Европа › Польша', S), 8.25);
+  assert.strictEqual(fc('3 рубля 1995 Ag 900 34,88 г', 'Монеты › Россия', S), 31.39);       // текст важнее таблицы
+  assert.strictEqual(fc('20 рублей 2019 Европейские игры', 'Беларусь (после 1991) Серебро', S), 26.1); // нижний из весов
+  assert.strictEqual(fc('Белая синица. 10 рублей. Серебро.', 'Беларусь', S), 15.5);           // без года
+  assert.strictEqual(fc('Монета 1/2 oz серебро 999', null, S), 15.55);
+  assert.strictEqual(fc('Медаль', null, S, 'Ag 925, вес монеты 28,28 г'), 26.16);
+  assert.strictEqual(fc('20 лир 1970 Италия', 'Европа', {}), null);                          // металл неизвестен — не золото
+  assert.strictEqual(fc('1 рубль 1898 АГ', null), 18);                                       // Империя — по-прежнему таблица
+  const p = parseCoin({ title: '20 франков 1910', sectionPath: 'Европа', specs: G });
+  assert.strictEqual(p.ruler, null); // иностранная монета — не «Николай II»
+});
+check('после 1991: ни нашей медианы, ни архивов по номиналу и году (под ними разные памятные)', () => {
+  const { catalogKeys } = require('./coins/store');
+  const by = parseCoin({ title: '20 рублей 2018 Финансовая система Беларуси серебро', sectionPath: null });
+  assert.deepStrictEqual(groupKeys(by), []);
+  assert.deepStrictEqual(catalogKeys(by), []);
+  assert.ok(groupKeys(parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null })).length > 0);
+});
+check('Kufar: коллекции, альбомы, россыпь; не «из коллекции» и не пустые альбомы', () => {
+  const { collectionHint } = require('./coins/parse');
+  assert.strictEqual(collectionHint('Коллекция монет СССР'), 'коллекция');
+  assert.strictEqual(collectionHint('Кляссер с монетами'), 'альбом / кляссер');
+  assert.strictEqual(collectionHint('Монеты россыпью 2 кг'), 'россыпь');
+  assert.strictEqual(collectionHint('Монеты от деда, разные'), 'наследство');
+  assert.strictEqual(collectionHint('Монеты 150 шт'), 'много монет');
+  assert.strictEqual(collectionHint('Монеты старые'), 'много монет');
+  assert.strictEqual(collectionHint('50 копеек 1925 из моей коллекции'), null);
+  assert.strictEqual(collectionHint('Альбом для монет, новый'), null);
+  assert.strictEqual(collectionHint('Коллекция банкнот'), null);
+  assert.strictEqual(collectionHint('монета 50 копеек 1925'), null);
+});
+check('ay.by: ник продавца из карточки, страницы продавца, сортировка «Новые»', () => {
+  const { authorNick, sellerPageUrl } = require('./coins/ayby');
+  assert.strictEqual(authorNick('maybach - 888 99.8%'), 'maybach - 888');
+  assert.strictEqual(authorNick('onos 100%'), 'onos');
+  assert.strictEqual(sellerPageUrl('6332437'), 'https://ay.by/whoiswho.phtml?id=6332437&show=auction_active&auctions_limit=100');
+  assert.strictEqual(sellerPageUrl('6332437', 3), 'https://ay.by/whoiswho.phtml?id=6332437&show=auction_active&auctions_limit=100&page=3');
+  const { listUrl } = require('./coins');
+  assert.strictEqual(listUrl('https://coins.ay.by/sssr/1921-1941/'), 'https://coins.ay.by/sssr/1921-1941/?order=create');
+  assert.strictEqual(listUrl('https://coins.ay.by/topic.phtml?f=1&ti1=6', 2), 'https://coins.ay.by/topic.phtml?f=1&ti1=6&order=create&page=2');
+});
+check('лента: какие карточки открывать и каким мониторам отдавать лот', () => {
+  const { feedCandidate, feedOwners } = require('./coins');
+  const nicks = new Set(['onos']);
+  assert.strictEqual(feedCandidate({ title: '2 гривны 2005г. Песчаный слепыш', author: 'Panas 100%' }, nicks), false);
+  assert.strictEqual(feedCandidate({ title: 'Обыкновенная горлица. 10 рублей. Серебро.', author: 'x 99%' }, nicks), true);
+  assert.strictEqual(feedCandidate({ title: 'Рубль 1892 (АГ)', author: 'x 99%' }, nicks), true);     // металл по номиналу и году
+  assert.strictEqual(feedCandidate({ title: '1 копейка 1937', author: 'onos 100%' }, nicks), true); // продавец из списка
+  const silver = parseCoin({ title: '5 злотых 1934', sectionPath: 'Европа › Польша', specs: { 'Металл': 'Серебро' } });
+  const keys = (lot, p) => feedOwners(lot, p).map((m) => m.key);
+  assert.ok(keys({ sellerId: '1', categoryPath: 'Монеты › Европа › Польша' }, silver).includes('coins-silver'));
+  assert.ok(!keys({ sellerId: '1', categoryPath: 'Монеты › Европа › Польша' }, silver).includes('coins-sellers'));
+  assert.ok(keys({ sellerId: '6332437', categoryPath: 'Монеты › СССР' }, parseCoin({ title: '1 копейка 1937', sectionPath: null })).includes('coins-sellers'));
+  assert.ok(!keys({ sellerId: '1', categoryPath: 'Монеты › Европа' }, silver).includes('coins-germany')); // сбор цен — без ленты
 });
 
 console.log(`\nпроверок пройдено: ${passed}`);

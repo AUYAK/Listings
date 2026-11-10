@@ -161,6 +161,23 @@ async function fetchLot(page, url) {
     out.categoryPath = pm ? pm[1].replace(/\s*(Монеты)\s*/, '$1 › ').trim() : null;
     const sm = body.match(/(?:Правила торгов|Предложить мою цену|Купить сейчас)\s+(.{2,40}?)\s+\d+\s+(?:Физическое лицо|Юридическое лицо|Магазин)/);
     out.seller = sm ? sm[1].trim() : null;
+    // блок продавца: <a class="b-seller-info-summary" href="/whoiswho.phtml?id=N"> … __user-name, __rating-count
+    const sellerA = document.querySelector('a.b-seller-info-summary[href*="whoiswho"]');
+    out.sellerId = sellerA ? ((sellerA.getAttribute('href') || '').match(/id=(\d+)/) || [null, null])[1] : null;
+    out.sellerNick = text(document.querySelector('.b-seller-info-summary__user-name'));
+    const rc = text(document.querySelector('.b-seller-info-summary__rating-count'));
+    out.sellerRating = rc && /\d/.test(rc) ? parseInt(rc.replace(/\D/g, ''), 10) : null;
+    // «… победитель <a href="/whoiswho.phtml?id=N">ник</a>.» и «Минимальная цена не пройдена» — строки .b-lot-control__plain
+    out.winner = null; out.winnerId = null; out.reserveText = null;
+    const plains = document.querySelectorAll('.b-lot-control__plain');
+    for (let i = 0; i < plains.length; i++) {
+      const t = text(plains[i]) || '';
+      if (/победитель/.test(t)) {
+        const a = plains[i].querySelector('a[href*="whoiswho"]');
+        if (a) { out.winner = text(a); out.winnerId = ((a.getAttribute('href') || '').match(/id=(\d+)/) || [null, null])[1]; }
+      }
+      if (/Минимальная цена/.test(t)) out.reserveText = t;
+    }
     out.statusHint = (body.match(/Торги завершены[^.]{0,80}|Лот продан[^.]{0,80}|Лот снят[^.]{0,60}|Торги завершились[^.]{0,80}/) || [null])[0];
     // завершённый лот: «Завершён 26 октября в 16:09:04» в шапке и «Лот продан за 3,50 бел. руб. 26 октября в 16:09:04,
     // победитель Wolf71. 1 сделка» / «16 ставок» в блоке цены
@@ -201,6 +218,9 @@ function interpretLot(raw, code = 200) {
   else if (bids > 0) saleType = 'auction';
   const soldPrice = sold ? parsePrice(raw.soldText.match(/за\s*([\d\s.,]+)/)[1]) : null;
   const price = soldPrice ?? parsePrice(raw.priceText);
+  // победитель: ссылка в строке «Лот продан…», запасной вариант — текст «победитель ник»
+  const winner = raw.winner || (sold ? ((raw.soldText.match(/победитель\s+([^,]+?)\.?$/) || [null, null])[1] || null) : null);
+  const reserve = !raw.reserveText ? null : /не\s+пройдена/.test(raw.reserveText) ? 'not_met' : /пройдена/.test(raw.reserveText) ? 'met' : null;
 
   return {
     gone: false,
@@ -222,10 +242,87 @@ function interpretLot(raw, code = 200) {
     description: raw.description,
     views: raw.views,
     photos: raw.photos,
-    seller: raw.seller,
+    seller: raw.sellerNick || raw.seller,
+    sellerId: raw.sellerId || null,
+    sellerRating: Number.isFinite(raw.sellerRating) ? raw.sellerRating : null,
     sellerCity: raw.sellerCity,
+    winner,
+    winnerId: raw.winnerId || null,
+    reserve,              // 'not_met' — «Минимальная цена не пройдена»: дёшево продавец не отдаст
     categoryPath,
   };
 }
 
-module.exports = { discoverSubsections, scanListPage, fetchLot, interpretLot, parseEndedAt, parseTimeLeft, parsePrice, isBlocked, NAV_TIMEOUT };
+// Активные лоты продавца, страница pageNo по 100 (ближайшие к окончанию сверху):
+// whoiswho.phtml?id=N&show=auction_active&auctions_limit=100&page=K → таблица tr#lot_ID: td.txt (ссылка),
+// td.cost (<big> текущая цена, <small> цена «купить сейчас»), td.total-rates (ставки), td.lost-time («15 ч», «4 дня»).
+// Карточки в том же виде, что scanListPage. Меньше SELLER_PAGE_SIZE строк — последняя страница.
+const SELLER_PAGE_SIZE = 100;
+function sellerPageUrl(sellerId, pageNo = 1) {
+  return `https://ay.by/whoiswho.phtml?id=${encodeURIComponent(sellerId)}&show=auction_active&auctions_limit=${SELLER_PAGE_SIZE}${pageNo > 1 ? `&page=${pageNo}` : ''}`;
+}
+
+async function scanSellerPage(page, sellerId, pageNo = 1) {
+  const url = sellerPageUrl(sellerId, pageNo);
+  const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  if (resp && resp.status() === 404) return [];
+  await assertNotVerification(page);
+  await page.waitForSelector('tr[id^="lot_"], h1', { timeout: 10000 }).catch(() => {});
+  const rows = await page.evaluate(() => {
+    const out = [];
+    const trs = document.querySelectorAll('tr[id^="lot_"]');
+    for (let i = 0; i < trs.length; i++) {
+      const tr = trs[i];
+      const a = tr.querySelector('td.txt a[href*="/lot/"]');
+      if (!a) continue;
+      const big = tr.querySelector('td.cost big');
+      const small = tr.querySelector('td.cost small');
+      const rates = tr.querySelector('td.total-rates');
+      const left = tr.querySelector('td.lost-time');
+      const img = tr.querySelector('td.ph img');
+      out.push({
+        id: tr.id.replace('lot_', ''),
+        url: a.href.split('?')[0],
+        title: a.textContent.replace(/\s+/g, ' ').trim(),
+        priceText: big ? big.textContent : null,
+        buyNowText: small ? small.textContent : null,
+        bidsText: rates ? rates.textContent.trim() : '',
+        timeLeftText: left ? left.textContent.trim() : null,
+        thumb: img ? (img.getAttribute('data-src') || img.src) : null,
+      });
+    }
+    return out;
+  });
+  const now = Date.now();
+  return rows.map((c) => {
+    const left = parseTimeLeft(c.timeLeftText);
+    return { ...c, author: null, price: parsePrice(c.priceText), buyNowPrice: parsePrice(c.buyNowText), bids: parseInt((c.bidsText.match(/\d+/) || ['0'])[0], 10), endsAt: left != null ? new Date(now + left) : null };
+  });
+}
+
+// Профиль пользователя: <h1>ник <sup title="Рейтинг пользователя">348</sup></h1>, отзывы dt.resp-good / resp-neut / resp-false
+async function fetchUser(page, userId) {
+  const resp = await page.goto(`https://ay.by/whoiswho.phtml?id=${encodeURIComponent(userId)}`, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  if (resp && resp.status() === 404) return null;
+  await assertNotVerification(page);
+  await page.waitForSelector('h1', { timeout: 10000 }).catch(() => {});
+  const u = await page.evaluate(() => {
+    const h1 = document.querySelector('h1');
+    if (!h1) return null;
+    let nick = null;
+    for (let i = 0; i < h1.childNodes.length && !nick; i++) {
+      const n = h1.childNodes[i];
+      if (n.nodeType === 3 && n.textContent.trim()) nick = n.textContent.trim();
+    }
+    const int = (el) => (el && /\d/.test(el.textContent) ? parseInt(el.textContent.replace(/\D/g, ''), 10) : null);
+    return { nick, rating: int(h1.querySelector('sup')), positive: int(document.querySelector('dt.resp-good')), negative: int(document.querySelector('dt.resp-false')) };
+  });
+  return u && u.nick ? { id: String(userId), ...u } : null;
+}
+
+// Ник продавца из карточки списка: «maybach - 888 99.8%» → «maybach - 888» (процент положительных отзывов в конце)
+function authorNick(author) {
+  return (author || '').replace(/\s+\d+(?:[.,]\d+)?\s*%\s*$/, '').trim() || null;
+}
+
+module.exports = { discoverSubsections, scanListPage, scanSellerPage, sellerPageUrl, authorNick, fetchLot, fetchUser, interpretLot, parseEndedAt, parseTimeLeft, parsePrice, isBlocked, NAV_TIMEOUT, SELLER_PAGE_SIZE };

@@ -57,6 +57,8 @@ function pickIssue(issues, parsed) {
 // Возвращает { source:'numista', title, prices:{VF:…}, currency:'BYN' } или null.
 async function lookup(parsed) {
   if (!KEY) return null;
+  // только Империя и СССР: у памятных после 1991 под одним номиналом и годом десятки разных монет
+  if (!parsed.ruler) return null;
   const key = typeKey(parsed);
   if (!key) return null;
   const hit = await cached(key);

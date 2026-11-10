@@ -3,7 +3,7 @@
 // → строки «монета + буквы/разновидность» со ссылкой ?child_id=N#sales → страница проходов (30 на страницу,
 // новые сверху, ?page=N). Разбор регулярками по HTML, без браузера: сайт отдаёт страницы обычному fetch.
 
-const { denominationFrom, yearFrom } = require('./parse');
+const { denominationFrom, yearFrom, gradeTokenFrom } = require('./parse');
 
 const BASE = 'https://gdenashel.ru';
 const USER_AGENT = 'kufar-monitor/1.0 (+coins catalog loader)';
@@ -51,14 +51,17 @@ function parseListHtml(html) {
   return out;
 }
 
-// Состояние в проходе → наша шкала. «MS64» (слаб) → UNC, «AU58» → AU, «VF25» → VF, «PF63» → PF.
+// Состояние в проходе → наша шкала. Числовой грейд по Шелдону бывает только у слабов (в архиве 2022–2025 ни одного
+// исключения) → корзина слаба: «MS64» → MS64, «MS67» → MS66+, «AU58» → AU50-58, «PF63» → PF60-64 (см. parse.slabBucket).
+// Буквенный — сырая монета: «UNC», «XF+», «PROOF» → UNC, XF, PF. «AU DETAILS» (проблемный слаб) → null, в ориентир не идёт.
 function normalizeGrade(raw) {
-  const g = (raw || '').toUpperCase().replace(/\s+/g, '');
+  const g = (raw || '').toUpperCase().replace(/[\s-]+/g, '');
   if (!g) return null;
+  if (/DET/.test(g)) return null;
+  const token = gradeTokenFrom(g);
+  // числовой грейд вне корзин («PF55», «AU45», «VF10») — как буквенный: такие слабы по цене ≈ сырая монета
+  if (token && /^(MS|PF|PR|SP|PL|AU|XF|EF|VF|F)\d/.test(g)) return token.bucket || ({ MS: 'UNC', PF: 'PF', AU: 'AU', XF: 'XF', VF: 'VF', F: 'F' }[token.scale] || null);
   if (/^(PROOF|PF|PR)/.test(g)) return 'PF';
-  // Слабы MS64 и выше — отборные экземпляры, их цена в разы выше «просто UNC» с ay.by; держим отдельно,
-  // как ориентир для обычных лотов не используются (см. coins/market.js)
-  if (/^MS(6[4-9]|70)/.test(g)) return 'MS64+';
   if (/^(UNC|MS|BU)/.test(g)) return 'UNC';
   if (/^AU/.test(g)) return 'AU';
   if (/^(XF|EF)/.test(g)) return 'XF';
