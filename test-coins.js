@@ -1023,6 +1023,15 @@ check('злотые — Польша и без раздела: серебро с
   assert.strictEqual(p.world.country, 'Польша');
   assert.deepStrictEqual(fineContent(p), { metal: 'silver', grams: 8.25 });
 });
+check('годы до/нашей эры и диапазон лет — не граммы', () => {
+  // ay.by 2026-11-16: «Коммод 177-192 г.н.э Денарий серебро» считался лотом серебра на вес 192 г
+  assert.strictEqual(parseCoin({ title: 'Коммод 177-192 г.н.э Денарий серебро Рим Римская империя', sectionPath: null }).weight, null);
+  assert.strictEqual(parseCoin({ title: 'Драхма серебро 336-323 г. до н.э. Александр', sectionPath: null }).weight, null);
+  assert.strictEqual(parseCoin({ title: 'Денарий серебро 200 г. н. э.', sectionPath: null }).weight, null);
+  // настоящий вес по-прежнему читается
+  assert.strictEqual(parseCoin({ title: 'Серебро лом 875 пр. 192 г', sectionPath: null }).weight.grams, 192);
+  assert.strictEqual(parseCoin({ title: 'Серебро россыпь 150 г.', sectionPath: null }).weight.grams, 150);
+});
 check('перевыставленный лот: прошлые раунды в карточке', () => {
   const { roundsLine } = require('./coins');
   assert.strictEqual(roundsLine([]), null);

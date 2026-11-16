@@ -206,12 +206,18 @@ const BULK_HINT = /лом|россып|на вес|вес лота|общ\p{L}*\
 const PURITIES = [999, 960, 958, 925, 916, 900, 875, 868, 835, 830, 800, 750, 720, 625, 600, 583, 500];
 const PURITY_DEFAULT = 0.5; // проба не указана: считаем по билону 500 — нижняя оценка смешанного серебра
 
+// «г» после числа — год, а не граммы: «177-192 г.н.э», «III в. до н.э.», «1898 г.в.», диапазон лет «1894-1917 г»
+// (ay.by 2026-11-16: «Коммод 177-192 г.н.э Денарий серебро» стал лотом серебра на вес 192 г)
+const YEAR_AFTER = /^\s*\.?\s*(?:н\.?\s*э|до\s*н\.?\s*э|в\.|г\.)/u;
+const RANGE_BEFORE = /\d\s*[-–—]\s*$/u;
 function gramsFrom(text) {
-  for (const m of (text || '').toLowerCase().matchAll(/(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(кг|килограм\p{L}*|грамм\p{L}*|гр|г)(?!\p{L})/gu)) {
+  const low = (text || '').toLowerCase();
+  for (const m of low.matchAll(/(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(кг|килограм\p{L}*|грамм\p{L}*|гр|г)(?!\p{L})/gu)) {
     const n = parseFloat(m[1].replace(',', '.'));
     if (!(n > 0)) continue;
     const kg = /^к/.test(m[2]);
     if (!kg && m[2] === 'г' && Number.isInteger(n) && n >= 1000 && n <= 2100) continue; // «1898 г» — год
+    if (m[2] === 'г' && (YEAR_AFTER.test(low.slice(m.index + m[0].length)) || RANGE_BEFORE.test(low.slice(0, m.index)))) continue;
     return kg ? n * 1000 : n;
   }
   return null;
