@@ -3,7 +3,8 @@
 // Пересчёт заново раскладывает состояния проходов (слабы — по корзинам MS60-62 … MS66+, см. gdenashel.normalizeGrade)
 // и пишет годы, за которые есть цены. Цены последних ~12 месяцев gdenashel без подписки не показывает.
 //
-//   node load-catalog.js                      все разделы (серебро и золото империи, серебро и червонцы СССР), проходы за 3 года
+//   node load-catalog.js                      все разделы (серебро и золото империи, тиражные СССР 1921–1957 и червонцы), за 3 года
+//   node load-catalog.js --only sssr          только СССР (медь, мельхиор и серебро 1921–1957, червонцы)
 //   node load-catalog.js --only zoloto        только золото империи (плюс --only odin-chervonec для СССР)
 //   node load-catalog.js --years 5            окно 5 лет
 //   node load-catalog.js --only nikolay-ii    только разделы, в URL которых есть подстрока
@@ -32,13 +33,15 @@ const SOURCE = 'gdenashel';
 // Разделы: серебро и золото по правителям Российской империи, тиражное серебро СССР, червонцы (1923 и «Сеятель» 1975–82).
 const IMPERIAL_RULERS = ['nikolay-ii', 'aleksandr-iii', 'aleksandr-ii', 'nikolay-i', 'aleksandr-i', 'pavel-i', 'ekaterina-ii', 'petr-iii', 'elizaveta', 'ioann-antonovich', 'anna-ioannovna', 'petr-ii', 'ekaterina-i', 'petr-i'];
 const IMPERIAL_METALS = ['serebro', 'zoloto'];
-const USSR_PAGES = ['10-kopeek', '15-kopeek', '20-kopeek', '50-kopeek', 'odin-poltinnik', '1-rubl'].map((d) => `${g.BASE}/coins/sssr/tirajnye/1921-1958/${d}`);
+const USSR_PAGES = ['polkopeyki', '1-kopeyka', '2-kopeyki', '3-kopeyki', '5-kopeek', '10-kopeek', '15-kopeek', '20-kopeek', '50-kopeek', 'odin-poltinnik', '1-rubl']
+  .map((d) => `${g.BASE}/coins/sssr/tirajnye/1921-1958/${d}`);
 const USSR_GOLD_PAGES = [`${g.BASE}/coins/sssr/tirajnye/1921-1958/odin-chervonec`, `${g.BASE}/coins/sssr/yubileynye/zoloto/odin-chervonec`];
 
-// СССР: серебро — 10/15/20 коп 1921–1931, полтинники 1921–1927, рубли 1921–1924; только тиражные (не пробные, не местные)
-function ussrSilver(row) {
-  if (!/\/tirajnye\//.test(row.coinUrl) || !row.year) return false;
-  if ([10, 15, 20].includes(row.denomKop)) return row.year <= 1931;
+// СССР 1921–1957, только тиражные (не пробные, не местные): мелочь ½–20 коп — серебро до 1931 и медь/бронза/мельхиор
+// после (среди них дорогие годы: 15 коп 1935 — ~6,5 тыс. ₽ в средней сохранности); полтинники 1921–1927, рубли 1921–1924
+function ussrCirculation(row) {
+  if (!/\/tirajnye\//.test(row.coinUrl) || !row.year || row.year > 1957) return false;
+  if ([0.5, 1, 2, 3, 5, 10, 15, 20].includes(row.denomKop)) return true;
   if (row.denomKop === 50) return row.year <= 1927;
   if (row.denomKop === 100) return row.year <= 1924;
   return false;
@@ -64,7 +67,7 @@ async function collectListPages() {
       for (const url of g.parseDenominationLinks(html, section)) if (wanted(url)) pages.push({ url, filter: null });
     }
   }
-  for (const url of USSR_PAGES) if (wanted(url)) pages.push({ url, filter: ussrSilver });
+  for (const url of USSR_PAGES) if (wanted(url)) pages.push({ url, filter: ussrCirculation });
   for (const url of USSR_GOLD_PAGES) if (wanted(url)) pages.push({ url, filter: ussrGold });
   return pages;
 }

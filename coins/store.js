@@ -117,6 +117,21 @@ async function clearPhotoFiles(externalIds) {
   );
 }
 
+// Дочитанные, но ни разу не оценённые активные лоты (засев первого запуска, дочитка, прерванный цикл)
+async function lotsToAssess(monitorKey, limit) {
+  const res = await pool.query(
+    `SELECT l.id, l.external_id, l.url, l.title, a.section, a.category_path, a.sale_type, a.current_price, a.bids, a.reserve,
+            a.ends_at, a.specs, a.description
+     FROM listings.coin_lots a JOIN listings.listings l ON l.id = a.listing_id
+     WHERE l.monitor_key = $1 AND a.detail_fetched_at IS NOT NULL AND a.assessed_at IS NULL AND a.notified_at IS NULL
+       AND a.outcome IS NULL AND (a.ends_at IS NULL OR a.ends_at > NOW())
+     ORDER BY a.ends_at ASC NULLS LAST
+     LIMIT $2`,
+    [monitorKey, limit]
+  );
+  return res.rows;
+}
+
 async function markNotified(listingId) {
   await pool.query('UPDATE listings.coin_lots SET notified_at = NOW() WHERE listing_id = $1', [listingId]);
 }
@@ -169,6 +184,51 @@ async function knownOwners(monitorKeys) {
     owners.get(r.external_id).add(r.monitor_key);
   }
   return owners;
+}
+
+// ---- Перевыставленные лоты (listings.coin_lots.rounds, миграция 016) ----
+
+// Лоты мониторов с записанным итогом: external_id → Map(monitor_key → listing_id). Карточка такого лота в списке ay.by
+// значит, что его перевыставили (тот же номер). 30 минут после окончания не трогаем: список мог быть из кэша.
+async function endedLots(monitorKeys) {
+  const out = new Map();
+  if (!monitorKeys.length) return out;
+  const res = await pool.query(
+    `SELECT l.external_id, l.monitor_key, l.id FROM listings.listings l JOIN listings.coin_lots a ON a.listing_id = l.id
+     WHERE l.monitor_key = ANY($1::text[]) AND a.outcome IS NOT NULL AND COALESCE(a.ended_at, a.checked_at) < NOW() - interval '30 minutes'`,
+    [monitorKeys]
+  );
+  for (const r of res.rows) {
+    if (!out.has(r.external_id)) out.set(r.external_id, new Map());
+    out.get(r.external_id).set(r.monitor_key, r.id);
+  }
+  return out;
+}
+
+// Прошлый раунд — в rounds (ложное «снят» по 404 не сохраняется), лот — с чистого листа: без итога, оценки и
+// отметки об уведомлении, цена и срок из карточки, страница лота будет прочитана заново. false — колонки нет (нет миграции).
+async function relistLot(listingId, card) {
+  const res = await pool.query(
+    `UPDATE listings.coin_lots SET
+       rounds = COALESCE(rounds, '[]'::jsonb) || CASE WHEN outcome = 'removed' THEN '[]'::jsonb ELSE jsonb_build_array(jsonb_build_object(
+         'ended_at', ended_at, 'outcome', outcome, 'final_price', final_price, 'final_bids', final_bids,
+         'last_price', current_price, 'bids', bids, 'start_price', start_price, 'reserve', reserve, 'status', end_status_text)) END,
+       outcome = NULL, final_price = NULL, final_bids = NULL, end_status_text = NULL, final_approx = FALSE, ended_at = NULL,
+       winner = NULL, winner_id = NULL, notified_at = NULL, assessed_at = NULL, quiet_checked_at = NULL, detail_fetched_at = NULL,
+       price_seen_at = NULL, est_catalog = NULL, est_catalog_src = NULL, est_market = NULL, est_market_n = NULL,
+       est_reference = NULL, deviation_pct = NULL, reserve = NULL,
+       current_price = COALESCE($2, current_price), start_price = COALESCE($2, start_price), bids = COALESCE($3, 0),
+       ends_at = $4, checked_at = NOW()
+     WHERE listing_id = $1 AND outcome IS NOT NULL`,
+    [listingId, card.price ?? null, card.bids ?? 0, card.endsAt ?? null]
+  );
+  if (res.rowCount) await pool.query(`UPDATE listings.listings SET status = 'active' WHERE id = $1`, [listingId]);
+  return res.rowCount > 0;
+}
+
+async function lotRounds(listingId) {
+  const res = await pool.query('SELECT rounds FROM listings.coin_lots WHERE listing_id = $1', [listingId]);
+  return (res.rows[0] && res.rows[0].rounds) || [];
 }
 
 // ---- Пользователи ay.by (listings.ayby_users, миграция 015) ----
@@ -374,7 +434,7 @@ async function rebuildCatalogFromSales(source, years, rate, minSamples = 2, norm
 // а сохранён id первого; ответ на любое фото альбома ведём к ближайшему сохранённому id не позже него.
 async function lotByMessage(chatId, msgId) {
   const res = await pool.query(
-    `SELECT l.id, l.external_id, l.url, l.title, l.monitor_key, a.sale_type, a.ends_at, a.current_price, a.bids, a.outcome, a.source
+    `SELECT ${LOT_COLUMNS}
      FROM listings.listing_notifications n
      JOIN listings.listings l ON l.id = n.listing_id
      JOIN listings.coin_lots a ON a.listing_id = l.id
@@ -383,6 +443,59 @@ async function lotByMessage(chatId, msgId) {
     [String(chatId), msgId]
   );
   return res.rows[0] || null;
+}
+
+// Лот ay.by по номеру (ставка по ссылке). Лот могут вести несколько мониторов — берём тот, на который уже есть
+// заявка (чтобы не завести вторую на тот же лот), иначе разобранный, иначе последний проверенный.
+const LOT_COLUMNS = `l.id, l.external_id, l.url, l.title, l.monitor_key, a.sale_type, a.ends_at, a.current_price, a.bids, a.outcome, a.source,
+       a.parsed, a.photos`;
+async function lotByExternalId(externalId) {
+  const res = await pool.query(
+    `SELECT ${LOT_COLUMNS}
+     FROM listings.listings l
+     JOIN listings.coin_lots a ON a.listing_id = l.id
+     LEFT JOIN listings.coin_bids b ON b.listing_id = l.id
+     WHERE l.external_id = $1 AND a.source = 'ayby'
+     ORDER BY (b.listing_id IS NULL), (a.detail_fetched_at IS NULL), a.checked_at DESC NULLS LAST
+     LIMIT 1`,
+    [String(externalId)]
+  );
+  return res.rows[0] || null;
+}
+
+// Лот, которого бот не видел (ставка по ссылке): отдельный ключ монитора — циклы coins.js его не трогают,
+// снайпер работает по coin_bids + coin_lots и ключ не смотрит
+const MANUAL_KEY = 'coins-manual';
+async function saveManualLot({ externalId, url, title, saleType, endsAt, price, bids }) {
+  const r = await pool.query(
+    `INSERT INTO listings.listings (external_id, monitor_key, url, title, first_seen, last_seen)
+     VALUES ($1, $2, $3, $4, NOW(), NOW())
+     ON CONFLICT (external_id, monitor_key) DO UPDATE SET last_seen = NOW(), title = EXCLUDED.title, url = EXCLUDED.url
+     RETURNING id`,
+    [String(externalId), MANUAL_KEY, url, title]
+  );
+  await pool.query(
+    `INSERT INTO listings.coin_lots (listing_id, source, section, sale_type, current_price, start_price, bids, ends_at, checked_at)
+     VALUES ($1, 'ayby', 'manual', $2, $3, $3, $4, $5, NOW())
+     ON CONFLICT (listing_id) DO UPDATE SET sale_type = COALESCE(EXCLUDED.sale_type, listings.coin_lots.sale_type),
+       current_price = COALESCE(EXCLUDED.current_price, listings.coin_lots.current_price),
+       bids = GREATEST(COALESCE(EXCLUDED.bids, 0), COALESCE(listings.coin_lots.bids, 0)),
+       ends_at = COALESCE(EXCLUDED.ends_at, listings.coin_lots.ends_at), checked_at = NOW()`,
+    [r.rows[0].id, saleType || null, price ?? null, bids ?? 0, endsAt ?? null]
+  );
+  return lotByExternalId(externalId);
+}
+
+// Лот помечен «снят» (404 при первом открытии / дочитке — бывает и от проверки на бота), а страница показывает
+// идущие торги: снять пометку, чтобы мониторы снова вели лот (цена под конец, итог)
+async function reviveLot(listingId) {
+  const res = await pool.query(
+    `UPDATE listings.coin_lots SET outcome = NULL, final_price = NULL, final_bids = NULL, end_status_text = NULL, ended_at = NULL, checked_at = NOW()
+     WHERE listing_id = $1 AND outcome = 'removed' RETURNING listing_id`,
+    [listingId]
+  );
+  if (res.rowCount) await pool.query(`UPDATE listings.listings SET status = 'active' WHERE id = $1`, [listingId]);
+  return res.rowCount > 0;
 }
 
 async function setBid(listingId, chatId, maxByn) {
@@ -448,8 +561,8 @@ async function openBids(chatId) {
 }
 
 module.exports = {
-  lotByMessage, setBid, cancelBid, getBid, updateBid, bidsDue, openBids,
-  upsertCard, saveLotDetails, recordOutcome, touchEndsAt, markNotified, markFavorited, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
+  lotByMessage, lotByExternalId, saveManualLot, reviveLot, endedLots, relistLot, lotRounds, setBid, cancelBid, getBid, updateBid, bidsDue, openBids,
+  upsertCard, saveLotDetails, recordOutcome, touchEndsAt, lotsToAssess, markNotified, markFavorited, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
   lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles, knownOwners, notifiedElsewhere, upsertUser, winnersToRefresh,
   getLot, getCoinRows, upsertKufarLot, saveEstimate,
   getCatalog, getCatalogs, catalogKeys, upsertCoinType, upsertSales, rebuildCatalogFromSales, renormalizeSales, CATALOG_FACTOR,

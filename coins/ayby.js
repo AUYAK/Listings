@@ -77,6 +77,7 @@ async function scanListPage(page, url) {
       const priceEl = c.querySelector('.item-type-card__info strong');
       const bidsEl = c.querySelector('.item-type-list__details__lots');
       const authorEl = c.querySelector('.item-type-card__author');
+      const shortEl = c.querySelector('.item-type-card__ainfo__short'); // «Серебро, 1799» — поле «Металл» и год лота
       const img = c.querySelector('img');
       out.push({
         id: String(id),
@@ -86,6 +87,7 @@ async function scanListPage(page, url) {
         priceText: priceEl ? priceEl.textContent.trim() : null,
         bidsText: bidsEl ? bidsEl.textContent.trim() : null,
         author: authorEl ? authorEl.textContent.replace(/\s+/g, ' ').trim() : null,
+        short: shortEl ? shortEl.textContent.replace(/\s+/g, ' ').trim() : null,
         thumb: img ? (img.getAttribute('data-src') || img.src) : null,
       });
     }

@@ -97,4 +97,52 @@ async function lookup(parsed) {
   return Object.keys(prices).length ? { source: 'numista', title: ruType.title, prices, currency: 'BYN' } : null;
 }
 
-module.exports = { lookup, typeKey, pickIssue, isConfigured: () => Boolean(KEY) };
+// ---- Вес драгметалла иностранной монеты (coins/content.js) ----
+const UNIT_EN = {
+  'доллар': 'dollar', 'цент': 'cents', 'франк': 'francs', 'лира': 'lire', 'гульден': 'gulden', 'дукат': 'ducat',
+  'крона': 'kronor', 'песо': 'pesos', 'злотый': 'zlotych', 'соверен': 'sovereign', 'пенни': 'pennia', 'марка': 'markkaa',
+};
+const MAX_CANDIDATES = 4;
+
+// Чистый металл по типу Numista: weight × проба из состава («Silver (.999)», «Gold (.9167)», «Silver 925»).
+// Проба не указана или металл другой — null.
+function fineFromType(t, metal) {
+  const weight = parseFloat(t && t.weight);
+  const comp = String((t && t.composition && (t.composition.text || t.composition)) || '');
+  if (!(weight > 0) || !(metal === 'gold' ? /gold|золот/i : /silver|billon|серебр/i).test(comp)) return null;
+  const dec = comp.match(/(?<![\d])0?[.,](\d{2,4})(?!\d)/);
+  const mil = comp.match(/(?<![\d.,])([3-9]\d{2})(?![\d.,])/);
+  const purity = dec ? parseFloat(`0.${dec[1]}`) : mil ? parseInt(mil[1], 10) / 1000 : null;
+  if (!(purity >= 0.3 && purity <= 1)) return null;
+  return Math.round(weight * purity * 100) / 100;
+}
+
+// Номинал и год → типы Numista этого года → вес × проба. Все кандидаты (не больше MAX_CANDIDATES) должны
+// совпасть в пределах 3%, иначе под номиналом разные монеты (унция и пол-унции) — null, решает следующий шаг.
+async function contentFor(parsed) {
+  if (!KEY) return null;
+  const w = parsed.world;
+  const unit = w && UNIT_EN[w.unit];
+  if (!unit || !parsed.year) return null;
+  const q = `${w.value} ${unit}`;
+  const search = await api('/types', { q, year: parsed.year, lang: 'en', count: 50, category: 'coin' });
+  const types = (Array.isArray(search.types) ? search.types : [])
+    .filter((t) => (!t.min_year || t.min_year <= parsed.year) && (!t.max_year || t.max_year >= parsed.year));
+  if (!types.length || types.length > MAX_CANDIDATES) return null;
+  const found = [];
+  for (const t of types) {
+    const full = await api(`/types/${t.id}`, { lang: 'en' });
+    const comp = String((full.composition && (full.composition.text || full.composition)) || '');
+    if (!(parsed.metal === 'gold' ? /gold/i : /silver|billon/i).test(comp)) continue; // тот же номинал в другом металле — не наш
+    const fine = fineFromType(full, parsed.metal);
+    if (!fine) return null; // серебро без пробы или веса — не угадываем
+    found.push({ fine, title: full.title || t.title, issuer: full.issuer && full.issuer.name });
+  }
+  if (!found.length) return null;
+  const min = Math.min(...found.map((f) => f.fine)), max = Math.max(...found.map((f) => f.fine));
+  if (max / min > 1.03) return null;
+  const f = found[0];
+  return { fineGrams: min, basis: `по Numista: ${f.issuer ? `${f.issuer}, ` : ''}${f.title}` };
+}
+
+module.exports = { lookup, typeKey, pickIssue, contentFor, fineFromType, isConfigured: () => Boolean(KEY) };

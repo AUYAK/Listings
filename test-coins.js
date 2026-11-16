@@ -1,5 +1,7 @@
 // Офлайн-проверка разбора монет (coins/parse.js) и разбора карточек ay.by. Запуск: node test-coins.js
 const assert = require('assert');
+// скидку на завышенное состояние проверяет отдельный тест (gradeDiscount), остальные — по заявленному состоянию
+process.env.COINS_GRADE_DISCOUNT = '0';
 const { parseCoin, groupKeys, denominationFrom, gradeFromTitle, gradeFromAyby, metalFrom } = require('./coins/parse');
 const { parseTimeLeft, parsePrice } = require('./coins/ayby');
 const { decideOutcome, worthNotifying, notifyTiming, AUCTION_NOTIFY_HOURS } = require('./coins');
@@ -142,6 +144,67 @@ check('фильтр монет для Kufar по заголовку', () => {
   assert.strictEqual(ok('УНОВИС. Редкая монета НБ РБ. 1 рубль.'), false);
 });
 
+check('русско-финские: пенни и марки — серебро/золото до 1917, ключ рынка', () => {
+  const { parseCoin } = require('./coins/parse');
+  const { fineContent } = require('./coins/metal');
+  const sp = 'Монеты › Россия › Российская Империя (до 1917) › 1894-1917 (Николай II) › Русско-финские';
+  const p = parseCoin({ title: '25 pennia 1916 года-1.', sectionPath: sp });
+  assert.strictEqual(p.metal, 'silver');
+  assert.strictEqual(fineContent(p).grams, 0.96);
+  assert.deepStrictEqual(groupKeys(p).map((k) => k.key), ['W|Финляндия|пенни25|1916']);
+  assert.strictEqual(parseCoin({ title: '1 марка 1915', sectionPath: sp }).metal, 'silver');
+  assert.strictEqual(parseCoin({ title: '20 марок 1913 Финляндия', sectionPath: null }).metal, 'gold');
+  assert.strictEqual(parseCoin({ title: '25 пенни 1921', sectionPath: null }).metal, null); // после 1917 — медно-никель
+  assert.strictEqual(parseCoin({ title: '2 марки 1911 Бавария', sectionPath: null }).foreign.unit, 'марка'); // германские — как были
+});
+
+check('все разделы ay.by: карточки только серебро/золото, без копий', () => {
+  const { cardWanted } = require('./coins');
+  const { MONITORS } = require('./config');
+  const silver = MONITORS.find((m) => m.key === 'coins-silver');
+  const gold = MONITORS.find((m) => m.key === 'coins-gold');
+  assert.ok(!silver.sections.some((s) => /kopii/.test(s.url)) && silver.sections.length >= 10);
+  assert.strictEqual(cardWanted(silver, { title: '25 pennia 1916 года-1.', short: 'Серебро, 1916' }), true);
+  assert.strictEqual(cardWanted(silver, { title: 'Талер 1765 Австрия', short: 'Серебро, 1765' }), true); // металл из карточки
+  assert.strictEqual(cardWanted(silver, { title: '1 рубль 1898 АГ', short: '' }), true);                 // по заголовку
+  assert.strictEqual(cardWanted(silver, { title: '2 копейки 1964 года СССР', short: '' }), false);
+  assert.strictEqual(cardWanted(silver, { title: 'Рубль 1898 копия', short: 'Серебро, 1898' }), false);
+  assert.strictEqual(cardWanted(gold, { title: '10 гульденов 1912 Нидерланды', short: 'Золото, 1912' }), true);
+  assert.strictEqual(cardWanted(gold, { title: '1 рубль 1898 АГ', short: '' }), false);
+  // сертификат без монеты (ay.by 5040457095): не серебро, хотя в карточке «Серебро»
+  assert.strictEqual(cardWanted(silver, { title: 'Сертификат к памятной монете Церковь–крепость Сынковичи. Серия "Памятники архитектуры Беларуси" 20 рублей 2000 год', short: 'Серебро, 2000' }), false);
+  assert.strictEqual(cardWanted(silver, { title: 'Футляр и сертификат для монеты 20 рублей Полоцк 1998', short: 'Серебро' }), false);
+  assert.strictEqual(cardWanted(silver, { title: 'Буклет к монете 20 рублей 2000, без монеты', short: 'Серебро' }), false);
+  // ay.by 5041540156: «Буклеты разные к серии …» и раздел «Буклеты, сертификаты»
+  assert.strictEqual(cardWanted(silver, { title: 'Буклеты разные к серии Праваслаўныя цудатворныя іконы. 20 рублей и 500 р. Серебро .', short: 'Серебро' }), false);
+  assert.ok(parseCoin({ title: '20 рублей 2010 Икона', sectionPath: 'Монеты › Беларусь (после 1991) › Буклеты, сертификаты' }).flags.includes('не монета'));
+  assert.ok(!parseCoin({ title: '20 рублей 2010 Икона', sectionPath: 'Монеты › Беларусь (после 1991) › Серебро' }).flags.includes('не монета'));
+  // ay.by 5041929853: «Серебро 999.Унция» — унция чистого серебра
+  const congo = parseCoin({ title: '240 франков Республики Конго 2013года.Китайский лунный календарь-Год змеи. Серебро 999.Унция .', sectionPath: null });
+  assert.strictEqual(congo.content && congo.content.fineGrams, 31.1);
+  assert.strictEqual(parseCoin({ title: 'Панда 2015 серебро 999 унция', sectionPath: null }).content.fineGrams, 31.1);
+  assert.strictEqual(parseCoin({ title: 'Британия 1 / 2 унции серебро 2020', sectionPath: null }).content.fineGrams, 15.55);
+  assert.strictEqual(cardWanted(silver, { title: '20 рублей 1998 Полоцк в капсуле с сертификатом', short: 'Серебро, 1998' }), true);
+  // «1 / 2 марки» с пробелами — половина марки (2,5 г серебра), не 2 марки (ay.by 5041902713)
+  const half = parseCoin({ title: 'Германия 1 / 2 марки 1914 А ( серебро ) Состояние СУПЕР', sectionPath: null });
+  assert.strictEqual(half.foreign.value, 0.5);
+  assert.strictEqual(half.foreign.mint, 'A');
+  assert.strictEqual(half.denomination, '½ марки');
+  assert.strictEqual(parseCoin({ title: 'Германия 1914 2 марки A', sectionPath: null }).foreign.value, 2);
+  const { notifyBlocker } = require('./coins/parse');
+  assert.strictEqual(notifyBlocker(parseCoin({ title: 'Коробка для монеты 20 рублей 2000', sectionPath: null }), 'buy_now'), 'не монета (сертификат, футляр)');
+});
+
+check('Kufar: серебро в описании и «не копия»', () => {
+  const { preciousLines, flagsFrom } = require('./coins/parse');
+  // «Монеты разных стран» (kufar 1085495367): одна медно-никелевая мелочь — ничего
+  assert.deepStrictEqual(preciousLines('Монеты разных стран. Цены в описании.\n\nШвеция:\n1 крона 1971г. 2р.\nГонконг:\n10 центов 1950г. 2,7р.\nТунис:\n100 миллимов 1960г. 1р.\nСмотрите другие мои объявления.'), []);
+  assert.deepStrictEqual(preciousLines('СССР:\n3 копейки 1961 1р.\n50 копеек 1924г. ПЛ 25р.\n15 копеек 1930 8р.\nЕсть серебро, пишите'), ['50 копеек 1924г. ПЛ 25р.', '15 копеек 1930 8р.']);
+  assert.strictEqual(flagsFrom('1 рубль 1924', 'Оригинал, не копия, не подделка').includes('копия'), false);
+  assert.strictEqual(flagsFrom('1 рубль 1924', 'копия хорошего качества').includes('копия'), true);
+  assert.strictEqual(flagsFrom('1 рубль 1924', 'не оригинал').includes('копия'), true);
+});
+
 check('завершённый лот ay.by: «Завершён … Лот продан за …» → продан, итоговая цена, дата окончания', () => {
   const { interpretLot, parseEndedAt } = require('./coins/ayby');
   const base = { title: '1/2 копейки 1899 СПБ.', timerSeconds: 0, priceText: '3,50 руб.', bidsText: '1 сделка', hasBidButton: false, hasBuyNow: false, bargain: false, specs: { 'Состояние': 'III (Коллекционное, VF)' }, photos: [], titleAreaText: '1/2 копейки 1899 СПБ. Завершён26 октября в 16:09:04', categoryPath: 'Монеты › Россия Российская Империя (до 1917) 1894-1917 (Николай II) Медь 1/2 копейки 1899 СПБ.' };
@@ -170,19 +233,23 @@ check('завершённый лот ay.by: «Завершён … Лот про
 
 console.log('оценка:');
 const cm = require('./coins/market');
-const row = (title, grade, price, o = {}) => ({ id: o.id || Math.random(), source: o.source || 'ayby', status: o.status || 'active', sale_type: o.sale || 'buy_now', grade, current_price: price, final_price: o.final ?? null, outcome: o.outcome ?? null, bids: o.bids ?? 0, parsed: parseCoin({ title, sectionPath: 'Серебро' }) });
+const row = (title, grade, price, o = {}) => ({ id: o.id || Math.random(), source: o.source || 'ayby', status: o.status || 'active', sale_type: o.sale || 'buy_now', grade, current_price: price, final_price: o.final ?? (o.outcome === 'sold' ? price : null), outcome: o.outcome ?? null, bids: o.bids ?? 0, parsed: parseCoin({ title, sectionPath: 'Серебро' }) });
+const SOLD = { outcome: 'sold', sale: 'auction' };
 const rows = [
-  row('1 рубль 1898 АГ', 'VF', 120), row('Рубль 1898 АГ', 'VF', 130), row('1 рубль 1898 АГ', 'VF', 110, { outcome: 'sold', final: 100 }),
-  row('1 рубль 1898 АГ', 'XF', 300), row('1 рубль 1898 АГ', 'XF', 320), row('1 рубль 1898 АГ', 'XF', 280),
+  row('1 рубль 1898 АГ', 'VF', 120, SOLD), row('Рубль 1898 АГ', 'VF', 130, SOLD), row('1 рубль 1898 АГ', 'VF', 110, { ...SOLD, final: 100 }),
+  row('1 рубль 1898 АГ', 'VF', 400), row('1 рубль 1898 АГ', 'VF', 450, { source: 'kufar', status: 'inactive' }), // просят — не ориентир
+  row('1 рубль 1898 АГ', 'XF', 300, SOLD), row('1 рубль 1898 АГ', 'XF', 320, SOLD), row('1 рубль 1898 АГ', 'XF', 280, SOLD),
   row('1 рубль 1899 ФЗ', 'VF', 125), row('1 рубль 1897 АГ', 'VF', 115, { sale: 'auction', bids: 0 }), // старт без ставок — не цена
   row('1 рубль 1898 АГ копия', 'VF', 20), // копии в оценку не идут
 ];
-check('наша оценка: та же группа и то же состояние, узкая группа при ≥3 лотах', () => {
+check('наша оценка: та же группа и то же состояние, медиана продаж ay.by; цены «просят» отдельно', () => {
   const p = parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
   const m = cm.marketEstimate(rows, p);
   assert.strictEqual(m.label, '1 рубль 1898 АГ');
-  assert.strictEqual(m.n, 3);
+  assert.strictEqual(m.soldN, 3);
   assert.strictEqual(m.refMedian, 120);
+  assert.strictEqual(m.askN, 2);
+  assert.strictEqual(m.askMedian, 425);
   const x = cm.marketEstimate(rows, parseCoin({ title: 'Рубль 1898 АГ XF', sectionPath: 'Серебро', conditionText: 'II (Эстетическое, XF)' }));
   assert.strictEqual(x.refMedian, 300);
   assert.strictEqual(cm.marketEstimate(rows, parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро' })), null); // без состояния — нет оценки
@@ -215,8 +282,8 @@ check('ориентир — самый низкий из источников, �
 check('строки оценки в карточке', () => {
   const p = parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
   const lines = cm.formatEstimateLines(cm.assess({ parsed: p, price: 100, rows, catalog: { source: 'numista', prices: { VF: 150 } } }));
-  assert.deepStrictEqual(lines, ['📚 Numista (VF): 150 р.', '📊 Наша база (1 рубль 1898 АГ, VF): 120 р. по 3 лотам, продаж 1', '🟡 На 17% (20 р.) ниже нашей базы']);
-  assert.deepStrictEqual(cm.formatEstimateLines(cm.assess({ parsed: p, price: 100, rows: [] })), ['📊 Наша база: похожих лотов в этом состоянии ещё не было', '⚪ Ориентира пока нет: ни каталога, ни трёх похожих лотов']);
+  assert.deepStrictEqual(lines, ['📚 Numista (VF): 150 р.', '📊 Наша база (1 рубль 1898 АГ, VF): 120 р. по 3 продажам; просят 425 р. (2 лот.) — не ориентир', '🟡 На 17% (20 р.) ниже нашей базы']);
+  assert.deepStrictEqual(cm.formatEstimateLines(cm.assess({ parsed: p, price: 100, rows: [] })), ['📊 Наша база: похожих лотов в этом состоянии ещё не было', '⚪ Ориентира пока нет: ни каталога, ни трёх продаж на ay.by']);
   // несколько источников — каждый своей строкой, вердикт по самому низкому (Numista 140), редкость из справочника типа
   const multi = cm.assess({ parsed: p, price: 100, rows: [], coinType: { konros: 'R1+', mintage: 1100002 },
     catalogs: [{ source: 'gdenashel', prices: { VF: 150, XF: 400 }, samples: { VF: 42, XF: 17 }, windowYears: 3 }, { source: 'numista', prices: { VF: 140 } }] });
@@ -232,7 +299,7 @@ check('строки оценки в карточке', () => {
   ]);
   // слабы MS64+ из архива РФ: не ориентир для UNC-лота, только строка для справки; ориентир — наша база
   const unc = parseCoin({ title: '15 копеек 1908', sectionPath: 'Серебро', conditionText: 'I (Новое, Unc)' });
-  const uncRows = [row('15 копеек 1908', 'UNC', 100), row('15 копеек 1908', 'UNC', 110), row('15 копеек 1908', 'UNC', 90)];
+  const uncRows = [row('15 копеек 1908', 'UNC', 100, SOLD), row('15 копеек 1908', 'UNC', 110, SOLD), row('15 копеек 1908', 'UNC', 90, SOLD)];
   const slab = cm.assess({ parsed: unc, price: 9, rows: uncRows,
     catalogs: [{ source: 'gdenashel', prices: { 'MS64+': 458, XF: 40 }, samples: { 'MS64+': 4, XF: 6 }, windowYears: 3 }] });
   assert.strictEqual(slab.catalog.grade, 'XF'); // ближайшее состояние ниже UNC, MS64+ не в шкале
@@ -249,6 +316,41 @@ check('строки оценки в карточке', () => {
   assert.strictEqual(cm.usablePrice({ sale_type: 'auction', current_price: 9, bids: 5, outcome: null }), null);
   assert.deepStrictEqual(cm.usablePrice({ sale_type: 'auction', current_price: 9, final_price: 120, bids: 12, outcome: 'sold' }), { price: 120, sold: true });
   assert.deepStrictEqual(cm.usablePrice({ sale_type: 'buy_now', current_price: 95, outcome: null }), { price: 95, sold: false });
+  // пропавшее объявление Kufar — не продажа: могли снять и так
+  assert.deepStrictEqual(cm.usablePrice({ source: 'kufar', status: 'inactive', current_price: 60, outcome: null }), { price: 60, sold: false });
+});
+check('ориентир не из цен «купить сейчас»: 20 копеек 1862 AU за 99 р. при 8 лотах «просят 160» и одной продаже', () => {
+  const p = parseCoin({ title: '20 копеек 1862', sectionPath: 'Серебро', conditionText: 'II+ (Как новое, AU)' });
+  const ask = (t, price) => ({ id: Math.random(), source: 'ayby', sale_type: 'buy_now', grade: 'AU', current_price: price, outcome: null, title: t, parsed: parseCoin({ title: t, sectionPath: 'Серебро' }) });
+  const base = [ask('20 копеек 1861', 150), ask('20 копеек 1863', 160), ask('20 копеек 1867', 170), ask('20 копеек 1870', 160), ask('20 копеек 1875', 155),
+    { ...ask('20 копеек 1879', 140), sale_type: 'auction', final_price: 140, outcome: 'sold' }];
+  const e = cm.assess({ parsed: p, price: 99, rows: base, catalogs: [{ source: 'numista', prices: { AU: 173 } }] });
+  assert.strictEqual(e.market.level, 'ruler');
+  assert.strictEqual(e.market.refMedian, null);
+  assert.strictEqual(e.reference, 173); // Numista, а не медиана «просят» по всем годам
+  assert.ok(cm.formatEstimateLines(e).includes('📊 Наша база (20 копеек, Александр II, AU): продаж 1 (140 р.), все годы; просят 160 р. (5 лот.) — не ориентир'), cm.formatEstimateLines(e).join('\n'));
+  // три продажи того же года — ориентир, «просят» по-прежнему только для справки
+  const sold = (price) => ({ ...ask('20 копеек 1862', price), sale_type: 'auction', final_price: price, outcome: 'sold' });
+  const y = cm.assess({ parsed: p, price: 99, rows: [...base, sold(120), sold(130), sold(110), ask('20 копеек 1862', 300)] });
+  assert.strictEqual(y.market.label, '20 копеек 1862');
+  assert.strictEqual(y.market.refMedian, 120);
+  assert.strictEqual(y.reference, 120);
+});
+check('состояние со слов продавца: каталоги на ступень ниже, слабам и фото верим', () => {
+  const numista = { source: 'numista', prices: { F: 40, VF: 60, XF: 95, AU: 173 } };
+  const p = parseCoin({ title: '20 копеек 1862', sectionPath: 'Серебро', conditionText: 'II+ (Как новое, AU)' });
+  const e = cm.assess({ parsed: p, price: 99, rows: [], catalogs: [numista], gradeDiscount: 1 });
+  assert.strictEqual(e.catalog.grade, 'XF');
+  assert.strictEqual(e.reference, 95);
+  assert.strictEqual(e.isBargain, false); // 99 при 95 — не выгодно, а при AU 173 было бы «−43%»
+  assert.ok(cm.formatEstimateLines(e).includes('📉 Каталоги — по XF, а не AU: без слаба состояние обычно завышено'), cm.formatEstimateLines(e).join('\n'));
+  // фото, слаб, предположение F для Kufar — без скидки; G ниже не уходит
+  assert.strictEqual(cm.catalogGrade({ ...p, gradeSource: 'photo' }, 1), 'AU');
+  assert.strictEqual(cm.catalogGrade({ ...p, gradeSource: null }, 1), 'AU');
+  assert.strictEqual(cm.catalogGrade({ ...p, slab: { bucket: null } }, 1), 'AU');
+  assert.strictEqual(cm.catalogGrade({ ...p, grade: 'G' }, 1), 'G');
+  assert.strictEqual(cm.catalogGrade(parseCoin({ title: '1 рубль 1924 XF', sectionPath: 'Серебро' }), 1), 'VF');
+  assert.strictEqual(cm.catalogGrade(p, 0), 'AU');
 });
 check('редкость: шкала Конроса, иначе частота проходов', () => {
   assert.strictEqual(cm.rarityTier({}).name, 'обычная');
@@ -488,6 +590,12 @@ check('снайп: разбор ответа в Telegram', () => {
   assert.deepStrictEqual(parseBidReply('150'), { max: 150 });
   assert.deepStrictEqual(parseBidReply('150 р.'), { max: 150 });
   assert.deepStrictEqual(parseBidReply('Макс 150,50 руб'), { max: 150.5 });
+  assert.deepStrictEqual(parseBidReply('мц 120'), { max: 120 });
+  // ставка по ссылке: номер лота из ссылки с хвостом ?from=main
+  const { LOT_LINK } = require('./poll');
+  const lm = 'https://ay.by/lot/240-frankov-respubliki-kongo-2013goda-kitajskij-lunnyj-kalendar-god-zmei-serebro-999-unciya-5041929853.html?from=main мц 120'.match(LOT_LINK);
+  assert.strictEqual(lm[1], '5041929853');
+  assert.deepStrictEqual(parseBidReply(lm.input.replace(lm[0], ' ').trim()), { max: 120 });
   assert.deepStrictEqual(parseBidReply('до 2 500'), { max: 2500 });
   assert.deepStrictEqual(parseBidReply('отмена'), { cancel: true });
   assert.deepStrictEqual(parseBidReply('0'), { cancel: true });
@@ -621,7 +729,7 @@ check('слаб: ориентир — слабы той же корзины, с�
   assert.strictEqual(e.isBargain, true); // 300 при 447: −33%, 147 р.
   assert.ok(cm.formatEstimateLines(e).includes('📚 gdenashel.ru, аукционы РФ (слаб MS64, 8 прох., 2022–2025): 447 р.'), cm.formatEstimateLines(e).join('\n'));
   // в нашей базе: три сырых UNC по 200 и три слаба MS64 по 600 — для слаба считаются только слабы, для сырой — только сырые
-  const r = (t, cond, price) => ({ id: Math.random(), source: 'ayby', sale_type: 'buy_now', grade: 'UNC', current_price: price, outcome: null, title: t, parsed: parseCoin({ title: t, sectionPath: 'Серебро', conditionText: cond }) });
+  const r = (t, cond, price) => ({ id: Math.random(), source: 'ayby', sale_type: 'auction', grade: 'UNC', current_price: price, final_price: price, outcome: 'sold', title: t, parsed: parseCoin({ title: t, sectionPath: 'Серебро', conditionText: cond }) });
   const base = [r('1 рубль 1924', 'I (Новое, Unc)', 200), r('1 рубль 1924', 'I (Новое, Unc)', 210), r('1 рубль 1924', 'I (Новое, Unc)', 190),
     r('1 рубль 1924 NGC MS64', 'I (Новое, Unc)', 600), r('1 рубль 1924 MS-64 ННР', 'I (Новое, Unc)', 620), r('1 рубль 1924 слаб NGC MS 64', 'I (Новое, Unc)', 580)];
   assert.strictEqual(cm.marketEstimate(base, ms64).refMedian, 600);
@@ -794,4 +902,175 @@ check('лента: какие карточки открывать и каким 
   assert.ok(!keys({ sellerId: '1', categoryPath: 'Монеты › Европа' }, silver).includes('coins-germany')); // сбор цен — без ленты
 });
 
-console.log(`\nпроверок пройдено: ${passed}`);
+check('раздел ay.by «Копии, новоделы» — копия, даже без слова в заголовке; в нашу медиану не идёт', () => {
+  const { notifyBlocker } = require('./coins/parse');
+  const p = parseCoin({ title: '1 1/2 рубля 1836 год', sectionPath: 'Монеты › Копии, новоделы Российская Империя', conditionText: 'III (Коллекционное, VF)' });
+  assert.ok(p.flags.includes('копия'));
+  assert.strictEqual(notifyBlocker(p, 'buy_now'), 'копия');
+  assert.ok(!parseCoin({ title: 'Рубль 1898 АГ', sectionPath: 'Монеты › Россия › Российская Империя (до 1917)' }).flags.includes('копия'));
+  // старая строка базы без пометки, но из раздела копий: не попадает в медиану
+  const sold = (title, price, cat = null) => ({ id: Math.random(), source: 'ayby', sale_type: 'auction', grade: 'VF', current_price: price, final_price: price, outcome: 'sold', title, category_path: cat, parsed: parseCoin({ title, sectionPath: 'Серебро' }) });
+  const pv = parseCoin({ title: 'Рубль 1898 АГ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
+  const rows = [sold('Рубль 1898 АГ', 300), sold('Рубль 1898 АГ', 320), sold('Рубль 1898 АГ', 310), sold('Рубль 1898 АГ', 20, 'Монеты › Копии, новоделы Российская Империя')];
+  assert.strictEqual(cm.marketEstimate(rows, pv).soldN, 3);
+});
+
+console.log('СССР: медь и мельхиор 1921–1958, разновидности 1961–1991:');
+check('15 коп. 1935 мельхиор — монитор coins-ussr-base, а не «не серебро»; полкопейки — номинал', () => {
+  const { matchesMonitor } = require('./coins');
+  const { MONITORS } = require('./config');
+  const base = MONITORS.find((m) => m.key === 'coins-ussr-base');
+  const silver = MONITORS.find((m) => m.key === 'coins-silver');
+  const p = parseCoin({ title: '15 КОПЕЕК 1935 СОХРАН!', sectionPath: 'Монеты › СССР › 1921-1941 › 15 копеек', specs: { 'Металл': 'Медно-никелевый сплав' } });
+  assert.deepStrictEqual([p.denomKop, p.year, p.metal], [15, 1935, 'base']);
+  assert.strictEqual(matchesMonitor(base, p), true);
+  assert.strictEqual(matchesMonitor(silver, p), false);
+  assert.strictEqual(matchesMonitor(base, parseCoin({ title: '15 копеек 1927', sectionPath: null, specs: { 'Металл': 'Серебро' } })), false); // серебро — coins-silver
+  assert.strictEqual(denominationFrom('Полкопейки 1925'), 0.5);
+});
+check('таблица разновидностей 1961–1991 и сбор лотов ay.by без уведомлений', () => {
+  const { ussrVariety } = require('./coins/parse');
+  const v = (t) => ussrVariety(parseCoin({ title: t, sectionPath: null }));
+  assert.match(v('20 копеек 1991'), /без буквы/);
+  assert.match(v('5 копеек 1990'), /буква М/);
+  assert.match(v('3 копейки 1990'), /белая/);
+  assert.strictEqual(v('2 копейки 1975'), null);
+  assert.strictEqual(v('Рубль 1924'), null); // серебро, не 1961–1991
+  const { MONITORS } = require('./config');
+  const m = MONITORS.find((x) => x.key === 'coins-ussr-unc');
+  assert.strictEqual(m.notify, false);
+  assert.deepStrictEqual(['20 копеек 1991', '2 копейки 1975 UNC', '2 копейки 1975', 'штемпель 1.2 3 копейки 1975'].map((t) => m.titleFilter.test(t)), [true, true, false, false]);
+});
+check('ответ «буква»: буква, цвет, что искать у этого номинала', () => {
+  const { formatLetterCheck } = require('./coins/vision');
+  const text = formatLetterCheck({ result: { denomination: '20 копеек', year: '1991', letter: 'none', letter_confidence: 'medium', where: 'под гербом справа', color: 'белый', color_ok: true }, model: 'm', usage: null, costUsd: null }, 'без буквы; Л на кружке 15 коп.');
+  assert.ok(text.includes('Буква двора: нет буквы') && text.includes('ищут: без буквы') && text.includes('посмотрите фото сами'), text);
+  const odd = formatLetterCheck({ result: { denomination: '3 копейки', year: '1990', letter: 'M', letter_confidence: 'high', where: '', color: 'белый', color_ok: false }, model: 'm', usage: null, costUsd: null });
+  assert.ok(odd.includes('возможна перепутка'), odd);
+});
+
+console.log('оценка по фото (без вызова API):');
+check('подпись: цена, а не год и не номинал', () => {
+  const { captionPrice } = require('./coins/vision');
+  assert.strictEqual(captionPrice('50 копеек 1925, просят 60'), 60);
+  assert.strictEqual(captionPrice('рубль 1898 за 120'), 120);
+  assert.strictEqual(captionPrice('полтинник 1924 — 45 р.'), 45);
+  assert.strictEqual(captionPrice('20 копеек 1914'), null);
+  assert.strictEqual(captionPrice(''), null);
+});
+check('сколько предложить: доля ориентира, не меньше металла, не больше максимума', () => {
+  const { offerFor } = require('./coins/vision');
+  assert.deepStrictEqual(offerFor({ reference: 75, metal: { value: 43 } }), { offer: 43, max: 52, byMetal: false }); // металл выше 55%
+  assert.deepStrictEqual(offerFor({ reference: 200, metal: { value: 87 } }), { offer: 110, max: 140, byMetal: false });
+  assert.deepStrictEqual(offerFor({ reference: null, metal: { value: 150.4 } }), { offer: 150, max: 150, byMetal: true });
+  assert.strictEqual(offerFor({ reference: null, metal: null }), null);
+});
+check('ответ модели → разбор монеты и текст отчёта', () => {
+  const { parsedFromVision, formatReport } = require('./coins/vision');
+  const coin = { title: '50 копеек 1925', country: 'СССР', metal: 'silver', grade: 'VF', grade_range: 'VF–XF', confidence: 'medium', problems: ['царапина на реверсе'], copy_risk: 'none', copy_signs: [], notes: 'гурт не виден' };
+  const p = parsedFromVision(coin);
+  assert.deepStrictEqual([p.denomKop, p.year, p.metal, p.grade, p.gradeSource], [50, 1925, 'silver', 'VF', 'photo']);
+  const est = { reference: 75, referenceSource: 'market', deviationPct: null, catalogs: [], metal: { metal: 'silver', grams: 9, value: 43, pricePerG: 4.83 }, market: null };
+  const graded = { result: { coins: [coin], photo_quality: 'fair', need_more: ['гурт'], summary: 'Обычный полтинник.' }, model: 'claude-opus-5-5', usage: { input_tokens: 5000, output_tokens: 1000 }, costUsd: 0.04 };
+  const [text] = formatReport(graded, [{ coin, est }], 40);
+  assert.ok(text.includes('<b>1. 50 копеек 1925</b> · серебро · 📷 VF (VF–XF), уверенность средняя'), text);
+  assert.ok(text.includes('⚠️ царапина на реверсе'), text);
+  assert.ok(text.includes('чистку по фото не определить'), text);
+  assert.ok(text.includes('💬 Предложить ≈ 43 р., максимум 52 р. · просят 40 р. — можно брать'), text);
+  assert.ok(text.includes('Дозапросить: гурт'), text);
+  assert.ok(text.includes('5000 + 1000 токенов ≈ $0.040'), text);
+  const risky = formatReport(graded, [{ coin: { ...coin, copy_risk: 'high', copy_signs: ['литьё'] }, est }])[0];
+  assert.ok(risky.includes('⛔ Высокий риск копии'), risky);
+  assert.ok(!risky.includes('💬'), risky);
+});
+check('«фото» на карточку лота: состояние по фото против продавца, максимум для снайпа', () => {
+  const { formatLotRegrade, lotHint } = require('./coins/vision');
+  const coin = { title: '20 копеек 1862 СПБ МИ', country: 'Россия', metal: 'silver', grade: 'VF', grade_range: 'F–VF', confidence: 'medium', problems: ['следы чистки по полю', 'забоина на гурте'], copy_risk: 'none', copy_signs: [], notes: '' };
+  const graded = { result: { coins: [coin], photo_quality: 'good', need_more: [], summary: '' }, model: 'claude-opus-5-5', usage: { input_tokens: 3000, output_tokens: 500 }, costUsd: 0.022 };
+  const p = parseCoin({ title: '20 копеек 1862', sectionPath: 'Серебро', conditionText: 'II+ (Как новое, AU)' });
+  const numista = [{ source: 'numista', prices: { F: 40, VF: 60, XF: 95, AU: 173 } }];
+  const before = cm.assess({ parsed: p, price: 99, rows: [], catalogs: numista, gradeDiscount: 0 });
+  const after = cm.assess({ parsed: { ...p, grade: 'VF', gradeSource: 'photo' }, price: 99, rows: [], catalogs: numista, gradeDiscount: 1 });
+  assert.strictEqual(after.reference, 60); // фото — без скидки на завышение
+  const [text] = formatLotRegrade(graded, { lot: { current_price: 99 }, declared: 'AU', before, after, auction: true });
+  assert.ok(text.includes('📷 <b>Состояние по фото: VF (F–VF)</b>, уверенность средняя · продавец: AU'), text);
+  assert.ok(text.includes('⚠️ забоина на гурте') && !text.includes('чистки по полю'), text); // чистку по фото не пишем, даже если модель упомянула
+  assert.ok(text.includes('🎯 Разумный максимум по VF: ≈ 42 р. (по AU было бы 121 р.)'), text);
+  const [fixed] = formatLotRegrade(graded, { lot: { current_price: 99 }, declared: null, before: null, after, auction: false });
+  assert.ok(fixed.includes('продавец: не указал') && fixed.includes('💬 Предложить ≈ 33 р., максимум 42 р. · просят 99 р. — дорого'), fixed);
+  assert.ok(!lotHint('20 копеек 1862').includes('AU')); // заявленное состояние модели не подсказываем
+});
+check('ответ модели без строгой схемы: обёртка ```json, текст вокруг, «VF+»', () => {
+  const { parseResult } = require('./coins/vision');
+  const body = '{"coins":[{"title":"20 копеек 1862","grade":"VF+","cleaned":false}],"photo_quality":"good","summary":"ок"}';
+  const r = parseResult('```json\n' + body + '\n```');
+  assert.strictEqual(r.coins[0].grade, 'F'); // «VF+» → VF → поправка по сверке с экспертами → F
+  assert.strictEqual(r.coins[0].grade_model, 'VF');
+  assert.deepStrictEqual(r.coins[0].problems, []);
+  assert.deepStrictEqual(r.need_more, []);
+  assert.strictEqual(parseResult('Вот оценка:\n' + body + '\nУдачи!').coins.length, 1);
+  assert.strictEqual(parseResult(body.replace('VF+', 'EF-AU')).coins[0].grade, 'XF');
+  assert.throws(() => parseResult('не могу оценить'), /не по формату/);
+  // поправка: F → VG, XF и выше без изменений
+  assert.deepStrictEqual(['F', 'XF', 'AU', 'VG'].map((g) => parseResult(body.replace('VF+', g)).coins[0].grade), ['VG', 'XF', 'AU', 'VG']);
+  const { formatLotRegrade } = require('./coins/vision');
+  const shown = formatLotRegrade({ result: { coins: [{ ...r.coins[0], grade_range: 'VF–XF', confidence: 'medium' }], photo_quality: 'good', need_more: [] }, model: 'm', usage: null, costUsd: null }, { lot: {} })[0];
+  assert.ok(shown.includes('Состояние по фото: F (модель видит VF–XF, −1 по сверке с экспертами)'), shown);
+});
+check('злотые — Польша и без раздела: серебро считается по таблице', () => {
+  const { fineContent } = require('./coins/metal');
+  const p = parseCoin({ title: '5 злотых 1934 серебро', sectionPath: 'Монеты' });
+  assert.strictEqual(p.world.country, 'Польша');
+  assert.deepStrictEqual(fineContent(p), { metal: 'silver', grams: 8.25 });
+});
+check('перевыставленный лот: прошлые раунды в карточке', () => {
+  const { roundsLine } = require('./coins');
+  assert.strictEqual(roundsLine([]), null);
+  const r1 = { ended_at: '2026-11-09T16:35:00Z', outcome: 'unsold', final_bids: 4, last_price: 50, reserve: 'not_met', start_price: 1 };
+  assert.strictEqual(roundsLine([r1]), '🔁 Перевыставлен: 09.11 — 4 ставки до 50 р., мин. цена не пройдена');
+  const r0 = { ended_at: '2026-11-02T16:35:00Z', outcome: 'unsold', final_bids: 0, bids: 0, last_price: 60, start_price: 60 };
+  assert.strictEqual(roundsLine([r0, r1]), '🔁 Перевыставлен (2-й раз): 09.11 — 4 ставки до 50 р., мин. цена не пройдена; 02.11 — без ставок, старт 60 р.');
+  assert.ok(roundsLine([{ ended_at: '2026-11-09T16:35:00Z', outcome: 'sold', final_price: 120, final_bids: 7 }]).includes('продан за 120 р. (видимо, не выкупили)'));
+});
+check('вес металла без таблицы: когда искать, ключ кэша, проба из Numista', () => {
+  const { needsLookup, cacheKey } = require('./coins/content');
+  const { fineFromType } = require('./coins/numista');
+  // серебро без таблицы и без веса в тексте — искать; с унцией в тексте, по таблице, копия, сертификат — нет
+  const niue = parseCoin({ title: '1 доллар 2015 Ниуэ Год козы серебро', sectionPath: null });
+  assert.strictEqual(needsLookup(niue), true);
+  assert.strictEqual(needsLookup(parseCoin({ title: '240 франков Конго 2013 Серебро 999.Унция', sectionPath: null })), false);
+  assert.strictEqual(needsLookup(parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null })), false);
+  assert.strictEqual(needsLookup(parseCoin({ title: '1 доллар 2015 Ниуэ серебро копия', sectionPath: null })), false);
+  assert.strictEqual(needsLookup(parseCoin({ title: '2 копейки 1964', sectionPath: null })), false);
+  // ключ: страна известна — номинал и год; неизвестна — заголовок
+  assert.strictEqual(cacheKey(parseCoin({ title: '10 злотых 1995 серебро', sectionPath: null }), 'x'), 'content|silver|Польша|злотый|10|1995');
+  assert.strictEqual(cacheKey(niue, '1 доллар 2015 Ниуэ «Год козы», серебро!'), 'content|silver|1 доллар 2015 ниуэ год козы серебро');
+  // проба из состава Numista
+  assert.strictEqual(fineFromType({ weight: 31.1, composition: { text: 'Silver (.999)' } }, 'silver'), 31.07);
+  assert.strictEqual(fineFromType({ weight: 28.28, composition: { text: 'Silver (.925)' } }, 'silver'), 26.16);
+  assert.strictEqual(fineFromType({ weight: 7.98, composition: { text: 'Gold (.9167)' } }, 'gold'), 7.32);
+  assert.strictEqual(fineFromType({ weight: 20, composition: { text: 'Silver 900' } }, 'silver'), 18);
+  assert.strictEqual(fineFromType({ weight: 20, composition: { text: 'Silver' } }, 'silver'), null);
+  assert.strictEqual(fineFromType({ weight: 20, composition: { text: 'Copper-nickel' } }, 'silver'), null);
+});
+
+// листы 2×2 для модели — асинхронно (sharp)
+const sheetsCheck = (async () => {
+  const { toSheets } = require('./coins/vision');
+  let sharp = null;
+  try { sharp = require('sharp'); } catch { return; } // без sharp склейки нет — проверять нечего
+  const img = async (w, h) => ({ data: (await sharp({ create: { width: w, height: h, channels: 3, background: '#888' } }).jpeg().toBuffer()).toString('base64'), mediaType: 'image/jpeg' });
+  const five = await Promise.all([img(650, 650), img(700, 690), img(1280, 960), img(400, 600), img(650, 650)]);
+  const r = await toSheets(five);
+  assert.strictEqual(r.sheets, true);
+  assert.strictEqual(r.images.length, 2); // 4 в лист + 1 отдельно
+  const meta = await sharp(Buffer.from(r.images[0].data, 'base64')).metadata();
+  assert.deepStrictEqual([meta.width, meta.height], [1536, 1536]);
+  const two = await toSheets(five.slice(0, 2));
+  const m2 = await sharp(Buffer.from(two.images[0].data, 'base64')).metadata();
+  assert.deepStrictEqual([two.images.length, m2.width, m2.height], [1, 1536, 768]);
+  assert.strictEqual((await toSheets(five.slice(0, 1))).sheets, false);
+})().then(() => { passed++; console.log('  ok  листы 2×2: 5 фото → 2 картинки, 2 фото → одна 1536×768'); },
+  (e) => { console.error('  FAIL листы 2×2: ' + e.message); process.exitCode = 1; });
+
+sheetsCheck.then(() => console.log(`\nпроверок пройдено: ${passed}`));

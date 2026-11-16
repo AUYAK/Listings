@@ -119,7 +119,20 @@ async function snipe(row) {
     const r = await bid.placeBid(page, max, { beforeConfirm: () => sleepUntil(deadline - SNIPE * 1000, 200) });
     const left = Math.round((deadline - r.clickedAt.getTime()) / 1000);
     await favorites.saveSession();
-    if (!r.ok) { await fail(row, `${r.state.errorText || 'перенаправило на вход'} (за ${left} с до конца)`); return; }
+    if (!r.ok) {
+      // текст на странице мог сбить проверку — перечитать лот: если ставка наша, всё в порядке
+      const again = await bid.openLot(page, row.url).catch(() => null);
+      if (again && again.yours) r.state = again;
+      else {
+        const why = `${r.state.errorText || 'перенаправило на вход'} (за ${left} с до конца)`;
+        await cstore.updateBid(row.listing_id, { status: 'failed', note: why });
+        await say(row.chat_id, `⚠️ ${lotLink(row)}: ставку не удалось подтвердить — ${why}. Итог торгов пришлю после окончания.`);
+        log(`[${row.external_id}] unconfirmed: ${why}`);
+        await sleepUntil(deadline + 20000, 5000);
+        await report(row, await readOutcome(page, row));
+        return;
+      }
+    }
     const note = `ставка ${bid.fmt(max)} за ${left} с до конца; цена после ставки ${bid.fmt(r.state.price)}${r.state.yours ? ', лидируем' : ''}`;
     await cstore.updateBid(row.listing_id, { status: 'placed', note, placedPrice: r.state.price, placedAt: r.clickedAt });
     await say(row.chat_id, `✅ ${lotLink(row)}: ставка до <b>${bid.fmt(max)}</b> поставлена за ${left} с до конца. Цена сейчас ${bid.fmt(r.state.price)}${r.state.yours ? ', вы лидируете' : ''}.`);

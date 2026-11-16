@@ -92,4 +92,39 @@ function enforceLimit(keepIds = new Set()) {
   return { bytes, removed, removedIds };
 }
 
-module.exports = { DIR, MAX_MB, PER_LOT, compression: sharp ? `${WIDTH}px q${QUALITY}` : null, saveLotPhotos, removeLotPhotos, inventory, enforceLimit };
+// ---- Фото лота для оценки по фото (бот, ответ «фото» на карточку) ----
+
+// Объявление Kufar со своей страницы: __NEXT_DATA__ → adView.data — описание (body) и галерея gallery.images
+// (полноразмерные снимки самого объявления; в других местах страницы — фото похожих). Частые запросы Kufar
+// ограничивает — вызывающий держит паузу между ними.
+async function kufarItem(itemUrl) {
+  const res = await fetch(itemUrl, { headers: { 'User-Agent': USER_AGENT, 'Accept-Language': 'ru' }, signal: AbortSignal.timeout(30000) });
+  if (!res.ok) throw new Error(`Kufar ${res.status}`);
+  const m = (await res.text()).match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (!m) throw new Error('Kufar: на странице нет данных объявления (снято или доступ ограничен)');
+  const data = JSON.parse(m[1]).props?.initialState?.adView?.data || {};
+  const g = data.gallery;
+  const images = (Array.isArray(g) ? g : g && Array.isArray(g.images) ? g.images : []).filter((u) => typeof u === 'string');
+  return { images, body: typeof data.body === 'string' ? data.body : '' };
+}
+const kufarGallery = async (itemUrl) => (await kufarItem(itemUrl)).images;
+
+// Все фото лота (до max) как { data: base64, mediaType } для coins/vision.js: ay.by — галерея из базы (650 px),
+// Kufar — со страницы объявления. Битые снимки пропускаются.
+async function lotImages(lot, max = 10) {
+  const urls = (lot.source === 'kufar' ? await kufarGallery(lot.url) : lot.photos || []).slice(0, max);
+  const images = [];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(30000) });
+      if (!res.ok) continue;
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (!buf.length || buf.length > 5 * MAX_FILE_BYTES) continue;
+      const type = (res.headers.get('content-type') || '').split(';')[0];
+      images.push({ data: buf.toString('base64'), mediaType: /^image\/(png|webp|gif)$/.test(type) ? type : 'image/jpeg' });
+    } catch { /* следующий снимок */ }
+  }
+  return images;
+}
+
+module.exports = { kufarItem, kufarGallery, lotImages, DIR, MAX_MB, PER_LOT, compression: sharp ? `${WIDTH}px q${QUALITY}` : null, saveLotPhotos, removeLotPhotos, inventory, enforceLimit };

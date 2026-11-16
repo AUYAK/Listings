@@ -3,12 +3,12 @@ const { chromium } = require('playwright');
 const store = require('./store');
 // Этот процесс ведёт только мониторы Kufar; площадки с другим source (ay.by → coins.js) живут отдельно
 const MONITORS = require('./config').MONITORS.filter((m) => !m.source || m.source === 'kufar');
-const { parseCoin, notifyBlocker, collectionHint } = require('./coins/parse');
+const { parseCoin, notifyBlocker, collectionHint, preciousLines } = require('./coins/parse');
 const cstore = require('./coins/store');
 const cmarket = require('./coins/market');
-const numista = require('./coins/numista');
+const { assessCoin } = require('./coins/assess');
 const tg = require('./telegram');
-const { metalValueLive } = require('./coins/metal');
+const photos = require('./coins/photos');
 
 // Мониторы с domain='coins' (Kufar): каждое объявление разбирается и сохраняется в coin_lots. Уведомления:
 //  1) серебро и золото без копий/подборок (лот серебра на вес — можно, его оценивает металл), только при выгоде
@@ -20,25 +20,29 @@ const { metalValueLive } = require('./coins/metal');
 // Возвращает { notify, reason, lines }.
 const ASSUMED_GRADE = 'F';
 const LOTS_MAX_BYN = parseFloat(process.env.KUFAR_LOTS_MAX_BYN || '0'); // 0 — без ограничения
-let coinRowsCache = { at: 0, rows: [] };
 async function assessCoinListing(listingId, listing) {
-  const parsed = parseCoin({ title: listing.title, sectionPath: null, description: listing.params });
+  // описание со страницы объявления (withItem): флаги «копия / дырка / чистка», проба и вес, слаб
+  const text = [listing.params, listing.description].filter(Boolean).join('\n');
+  const parsed = parseCoin({ title: listing.title, sectionPath: null, description: text });
   const price = extractPriceFromStr(listing.price, 'р.');
+  const priceOk = !(LOTS_MAX_BYN > 0 && price > LOTS_MAX_BYN);
   await cstore.upsertKufarLot(listingId, parsed, price).catch((err) => console.warn(`  [Coins] save failed: ${err.message}`));
   const lot = collectionHint(listing.title, listing.params);
-  if (lot && !parsed.flags.includes('копия') && !(LOTS_MAX_BYN > 0 && price > LOTS_MAX_BYN)) {
+  if (lot && !parsed.flags.includes('копия') && priceOk) {
     return { notify: true, lines: [`🧺 Похоже на коллекцию / россыпь (${lot}) — оценить по фото: ориентира у бота нет`] };
   }
-  if (!parsed.isPrecious) return { notify: false, reason: 'не серебро и не золото' };
+  if (!parsed.isPrecious) {
+    // заголовок ни о чём («Монеты разных стран»), а в описании — серебро или золото с номиналом/годом
+    const found = preciousLines(listing.description);
+    if (found.length && priceOk) {
+      return { notify: true, lines: ['📜 В описании серебро / золото — ориентира у бота нет, смотрите цены и фото:', ...found.map((l) => `• ${l}`)] };
+    }
+    return { notify: false, reason: 'не серебро и не золото' };
+  }
   const blocker = notifyBlocker(parsed, 'fixed');
   if (blocker) return { notify: false, reason: blocker };
-  if (Date.now() - coinRowsCache.at > 5 * 60e3) coinRowsCache = { at: Date.now(), rows: await cstore.getCoinRows(null).catch(() => []) };
-  // источники в карточке раздельно; ориентир — самый низкий с точным состоянием; металл — нижняя планка
-  const { catalogs, type } = await cstore.getCatalogs(parsed).catch(() => ({ catalogs: [], type: null }));
-  if (!catalogs.some((c) => c.source === 'numista')) { const n = await numista.lookup(parsed).catch(() => null); if (n) catalogs.push(n); }
-  const metal = await metalValueLive(parsed).catch(() => null);
   const forAssess = parsed.grade || parsed.slab ? parsed : { ...parsed, grade: ASSUMED_GRADE };
-  const est = cmarket.assess({ parsed: forAssess, price, rows: coinRowsCache.rows, excludeId: listingId, catalogs, coinType: type, metal, fixedPrice: true });
+  const est = await assessCoin({ parsed: forAssess, price, excludeId: listingId, fixedPrice: true, title: listing.title, description: text });
   await cstore.saveEstimate(listingId, est).catch(() => {});
   const coinLine = [parsed.denomination, parsed.year, parsed.mintmaster || parsed.mint, parsed.ruler, parsed.isGold ? 'золото' : 'серебро'].filter(Boolean).join(' · ');
   const gradeLine = parsed.grade ? `🏷 Состояние (из заголовка): ${parsed.grade}` : parsed.slab ? null : `🏷 Состояние не указано — ориентир по ${ASSUMED_GRADE} (нижняя оценка), смотрите фото`;
@@ -125,6 +129,26 @@ async function notify(listing, monitor, isUpdate = false, prev = null, listingId
     if (listingId && sentMsgId) {
       await store.saveNotification(listingId, chatId, sentMsgId).catch(() => {});
     }
+  }
+}
+
+// Страница нового объявления: в выдаче Kufar нет описания и только первое фото. Один запрос на объявление (монеты —
+// до оценки, остальное — перед карточкой) и пауза между ними (частые запросы Kufar ограничивает); не вышло —
+// остаётся заголовок и фото из выдачи.
+const ITEM_GAP_MS = 3000;
+let lastItemAt = 0;
+async function withItem(listing) {
+  if (listing.itemFetched) return;
+  listing.itemFetched = true;
+  const wait = lastItemAt + ITEM_GAP_MS - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  lastItemAt = Date.now();
+  try {
+    const { images, body } = await photos.kufarItem(listing.url);
+    if (images.length) listing.photos = images.slice(0, 10);
+    listing.description = body;
+  } catch (err) {
+    console.warn(`  [Kufar] ${listing.id}: страница не загрузилась (${err.message}) — только заголовок и фото из выдачи`);
   }
 }
 
@@ -217,6 +241,7 @@ async function checkMonitor(monitor, isFirstRun) {
 
       if (isNew) {
         if (monitor.domain === 'coins') {
+          await withItem(listing);
           const verdict = await assessCoinListing(listingId, listing);
           if (!verdict.notify) {
             console.log(`  [${monitor.name}] stored (${verdict.reason}): [${listing.id}] ${listing.title}`);
@@ -224,6 +249,7 @@ async function checkMonitor(monitor, isFirstRun) {
           }
           listing.extraLines = verdict.lines;
         }
+        await withItem(listing);
         await notify(listing, monitor, false, null, listingId);
         console.log(`  [${monitor.name}] NEW: [${listing.id}] ${listing.title} — ${listing.price?.replace(/\n/g, ' / ')}`);
       } else if (snapshotWritten && !isFirstSnapshot) {

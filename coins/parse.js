@@ -22,7 +22,7 @@ function rulerFor(year) {
   return null;
 }
 
-// Номинал в копейках: «50 копеек», «полтина», «1 рубль», «1,5 рубля», «25 пенни» (финские — не берём)
+// Номинал в копейках: «50 копеек», «полтина», «1 рубль», «1,5 рубля»; «25 пенни» — не копейки (Финляндия, worldFrom)
 // Стартовая ставка аукциона в заголовке: «С 1 РУБЛЯ!», «от 1 руб.», «старт 1 р.», «с рубля» — не номинал
 const START_BID_RE = /(?<!\p{L})(?:с|от|старт\p{L}*|(?:начальная\s+|стартовая\s+)?цена)\s*:?\s*(?:\d+(?:[.,]\d+)?\s*)?(?:бел\.?\s*)?(?:руб\p{L}*|р\.|byn)(?!\p{L})/giu;
 function stripStartBid(t) {
@@ -37,11 +37,13 @@ function denominationFrom(title) {
   // «7 рублей 50 копеек» (золото 1897) → 750
   const rk = t.match(/(?<![\d\/])(\d+)\s*руб\p{L}*\s+(\d{1,2})\s*коп/u);
   if (rk) return parseInt(rk[1], 10) * 100 + parseInt(rk[2], 10);
-  const m = t.match(/(?<![\d\/])(\d+(?:[.,]\d+)?)\s*(коп|руб|р\.|рубл)/u);
+  // «1р 1921» — «р» без точки только перед годом (иначе «… 100 р» — цена, а не номинал)
+  const m = t.match(/(?<![\d\/])(\d+(?:[.,]\d+)?)\s*(коп|руб|р\.|рубл|р(?=\s*1[6-9]\d\d(?!\d)))/u);
   if (m) {
     const n = parseFloat(m[1].replace(',', '.'));
     return m[2].startsWith('коп') ? Math.round(n) : Math.round(n * 100);
   }
+  if (new RegExp(W('полкопе\\p{L}*'), 'u').test(t)) return 0.5;
   if (new RegExp(W('полтин\\p{L}*'), 'u').test(t)) return 50;
   if (new RegExp(W('полуполтин\\p{L}*|четвертак\\p{L}*'), 'u').test(t)) return 25;
   if (new RegExp(W('двугривенн\\p{L}*'), 'u').test(t)) return 20;
@@ -85,9 +87,10 @@ function foreignFrom(title, sectionPath, year) {
   const t = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е'));
   if (NOT_COIN.test(t)) return null; // нотгельды, банкноты — бумага, не монеты
   if (!GERMAN_HINT.test(t) && !/германи/i.test(sectionPath || '')) return null;
-  const m = t.match(/(?<![\d\/.,])(\d+(?:[.,]\d+)?|½|1\/2)\s*(рейхс?\s*мар\p{L}*|марк\p{L}*|марок|пфен+и?н?г\p{L}*)/u);
+  // «1 / 2 марки» с пробелами — половина марки, а не «2 марки» (ay.by 5041902713)
+  const m = t.match(/(?<![\d\/.,]|\/\s+)(\d+(?:[.,]\d+)?|½|1\s*\/\s*2)\s*(рейхс?\s*мар\p{L}*|марк\p{L}*|марок|пфен+и?н?г\p{L}*)/u);
   if (!m) return null;
-  const value = m[1] === '½' || m[1] === '1/2' ? 0.5 : parseFloat(m[1].replace(',', '.'));
+  const value = m[1] === '½' || /^1\s*\/\s*2$/.test(m[1]) ? 0.5 : parseFloat(m[1].replace(',', '.'));
   if (!(value > 0 && value <= 1000)) return null;
   const unit = /^пф/.test(m[2]) ? 'пфенниг' : 'марка';
   // буква двора отдельно после года: «1911 A», «1911A», «1904 А» (кириллица), «1913 г. A», «1926 год. F», «1910 год, " F "»;
@@ -104,6 +107,7 @@ function foreignLabel(f) {
   if (!f) return null;
   const v = String(f.value).replace('.', ',');
   if (f.unit === 'пфенниг') return `${v} пфеннигов`;
+  if (f.value === 0.5) return '½ марки';
   const word = f.value === 1 ? 'марка' : f.value < 5 && Number.isInteger(f.value) ? 'марки' : 'марок';
   return `${v} ${word}`;
 }
@@ -225,7 +229,9 @@ function purityFrom(text) {
 // «1 oz», «Унция серебра», «1/2 унции» → чистый металл в унциях; «чистого серебра 31,1 г» → как написано;
 // «Ag 925» + «Вес монеты: 33,62 г» (поле ay.by или текст) → вес × проба. Возвращает { fineGrams, basis } или null.
 const OUNCE_G = 31.1035;
-const OUNCE = /(?<![\d.,\/])(?:(1\/2|1\/4|1\/10|1\/20|½|¼|\d+(?:[.,]\d+)?)\s*)?(?:тройск\p{L}*\s+)?(?:унци\p{L}*|oz)(?!\p{L})/iu;
+// «Серебро 999.Унция» (ay.by 5041929853): проверка «перед числом не цифра/точка» — только для числа, не для слова
+const OUNCE = /(?:(?<![\d.,\/])(1\s*\/\s*(?:2|4|10|20)|½|¼|\d+(?:[.,]\d+)?)\s*)?(?:тройск\p{L}*\s+)?(?:унци\p{L}*|oz)(?!\p{L})/iu;
+const PURITY_NUMBER = /^(?:9999|999|958|925|916|900|875|835|800|750|585|583|500)$/;
 const STATED_FINE = /(?:чист\p{L}*\s+(?:серебр|золот|металл)\p{L}*|содержани\p{L}*\s+(?:чист\p{L}*\s+)?(?:серебр|золот|металл)\p{L}*)[^\d\n]{0,15}(\d+(?:[.,]\d+)?)\s*(?:г|гр|грамм\p{L}*)(?!\p{L})/iu;
 const GROSS = /(?:вес|масса)\p{L}*[^\d\n]{0,12}(\d+(?:[.,]\d+)?)\s*(?:г|гр|грамм\p{L}*)(?!\p{L})/iu;
 const fracValue = (s) => (!s ? 1 : s === '½' ? 0.5 : s === '¼' ? 0.25 : s.includes('/') ? 1 / parseInt(s.split('/')[1], 10) : parseFloat(s.replace(',', '.')));
@@ -236,7 +242,8 @@ function contentFrom(title, description, specs = {}) {
   for (const [i, t] of texts.entries()) {
     const m = t.match(OUNCE);
     if (m) {
-      const oz = fracValue(m[1]);
+      // «Серебро 999 унция» — 999 это проба, а не 999 унций
+      const oz = m[1] && PURITY_NUMBER.test(m[1]) ? 1 : fracValue(m[1] && m[1].replace(/\s/g, ''));
       if (oz > 0 && oz <= 5) return { fineGrams: Math.round(oz * OUNCE_G * 100) / 100, basis: `${i ? 'описание' : 'заголовок'}: ${String(oz).replace('.', ',')} унц.` };
     }
   }
@@ -259,6 +266,9 @@ const WORLD_UNITS = [
   ['доллар', /доллар\p{L}*|dollars?(?!\p{L})/u], ['цент', /цент\p{L}*|cents?(?!\p{L})/u], ['франк', /франк\p{L}*|francs?(?!\p{L})/u],
   ['лира', /лир(?:а|ы|е)?(?!\p{L})|lire(?!\p{L})/u], ['гульден', /гульден\p{L}*/u], ['дукат', /дукат\p{L}*/u], ['крона', /крон(?:а|ы|ен|ер)?(?!\p{L})/u],
   ['песо', /песо(?!\p{L})/u], ['злотый', /злот\p{L}*/u], ['соверен', /соверен\p{L}*|sovereign/u],
+  // Финляндия в составе Империи: «25 pennia 1916», «50 пенни 1916 S», «1 markka 1915», «20 марок 1913» (германские
+  // марки разбирает раньше foreignFrom — по слову «Германия»/земле или разделу)
+  ['пенни', /пенни\p{L}*|penni\p{L}*/u], ['марка', /мар(?:ка|ки|ок)(?!\p{L})|markk\p{L}*/u],
 ];
 const WORLD_WORDS = [
   [/полсоверен|1\/2\s*соверен|half\s*sovereign/u, 'соверен', 0.5], [/(?<!\p{L})соверен|sovereign/u, 'соверен', 1],
@@ -268,19 +278,30 @@ const WORLD_WORDS = [
 const COUNTRIES = [
   ['США', /(?<!\p{L})(?:сша|usa)(?!\p{L})|соединенн\p{L}*\s+штат|морган|morgan|кеннеди|kennedy|peace\s*dollar/iu],
   ['Польша', /польш|polsk/iu], ['Беларусь', /беларус|белорус|нб\s?рб|нацбанк/iu], ['Германия', /германи|рейх/iu],
+  ['Великобритания', /британ|англи/iu], ['Финляндия', /финл|финск|finland|suomi|markk|penni/iu],
+];
+
+// Номинал одной страны: страна понятна и без раздела («5 злотых 1934» на Kufar)
+const UNIT_COUNTRY = { 'злотый': 'Польша', 'пенни': 'Финляндия' };
+
+// Финляндия 1864–1917 (русско-финские): серебро 750 (25, 50 пенни) и 868 (1, 2 марки), золото 10 и 20 марок.
+// После 1917 — медь и медно-никель. [единица, номинал, год от, год до, металл]
+const FINLAND_METAL = [
+  ['пенни', 25, 1865, 1917, 'silver'], ['пенни', 50, 1864, 1917, 'silver'], ['марка', 1, 1864, 1915, 'silver'],
+  ['марка', 2, 1865, 1908, 'silver'], ['марка', 10, 1878, 1913, 'gold'], ['марка', 20, 1878, 1913, 'gold'],
 ];
 
 function worldFrom(title, sectionPath, specs = {}) {
   const t = stripStartBid(`${title || ''} ${specs['Номинал'] || ''}`.toLowerCase().replace(/ё/g, 'е'));
   let unit = null, value = null;
   for (const [u, re] of WORLD_UNITS) {
-    const m = t.match(new RegExp(`(?<![\\d\\/.,])(\\d+(?:[.,]\\d+)?|1\\/2|½)\\s*(?:${re.source})`, 'u'));
-    if (m) { unit = u; value = fracValue(m[1]); break; }
+    const m = t.match(new RegExp(`(?<![\\d\\/.,]|\\/\\s+)(\\d+(?:[.,]\\d+)?|1\\s*\\/\\s*2|½)\\s*(?:${re.source})`, 'u'));
+    if (m) { unit = u; value = fracValue(m[1].replace(/\s/g, '')); break; }
   }
   if (!unit) for (const [re, u, v] of WORLD_WORDS) if (re.test(t)) { unit = u; value = v; break; }
   if (!unit) return null;
   const where = `${sectionPath || ''} ${title || ''}`;
-  const country = (COUNTRIES.find(([, re]) => re.test(where)) || [null])[0];
+  const country = (COUNTRIES.find(([, re]) => re.test(where)) || [null])[0] || UNIT_COUNTRY[unit] || null;
   return { unit, value, country };
 }
 
@@ -329,7 +350,7 @@ const GERMAN_METAL = [
   [3, 1908, 1918, 'silver'], [3, 1924, 1933, 'silver'], [5, 1874, 1915, 'silver'], [5, 1925, 1939, 'silver'], [10, 1871, 1915, 'gold'], [20, 1871, 1915, 'gold'],
 ];
 
-function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign = null) {
+function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign = null, world = null) {
   // поле «Металл» лота ay.by — самый надёжный источник
   const sm = (specMetal || '').toLowerCase();
   if (/серебр/.test(sm)) return 'silver';
@@ -363,6 +384,10 @@ function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign
     const row = GERMAN_METAL.find(([v, from, to]) => v === foreign.value && year >= from && year <= to);
     if (row) return row[3];
   }
+  if (world && world.country === 'Финляндия' && year) {
+    const row = FINLAND_METAL.find(([u, v, from, to]) => u === world.unit && v === world.value && year >= from && year <= to);
+    if (row) return row[4];
+  }
   return null;
 }
 
@@ -390,7 +415,8 @@ function gradeFromTitle(title) {
 }
 
 const FLAG_PATTERNS = [
-  ['копия', /копи[яи]|новодел|реплик|муляж|сувенир|фальш|подделк|не оригинал/iu],
+  // «не копия», «не подделка» в описании — наоборот, заверение продавца
+  ['копия', /(?<!не\s+)(?:копи[яи]|новодел|реплик|муляж|сувенир|фальш|подделк)|не\s+оригинал/iu],
   ['отверстие', /дырк|дыроч|отверст|подвес|запа[йя]|пайк|ушк/iu],
   ['чистка', /чищен|чистк|почищ|полиров|зачищ/iu],
   ['повреждения', /царап|забоин|потерт|вмятин|гнут|изгиб|коррози|окисл|пятн|следы/iu],
@@ -400,6 +426,14 @@ const FLAG_PATTERNS = [
   ['несколько монет', /лот из \d|подборк|(?<!из\s+(?:\p{L}+\s+)?)набор|\d+\s*шт\b|\d+\s*штук|одним лотом|(?<![\d\/])(?:[2-9]|[1-9]\d{1,2})\s*монет|(?<![\d\/])(?:\d{1,2}[\s,;]+(?:и\s+)?)+\d{1,2}\s*коп/iu],
   ['редкая', /редк|\bR\b|\bR[1-9]\b|биткин\s*r/iu],
 ];
+const COPY_SECTION = /копи[ия]|новодел|реплик|сувенир/iu;
+// Не монета, а принадлежность к ней: «Сертификат к памятной монете … 20 рублей 2000», «Футляр и сертификат для монеты»,
+// «… без монеты». «Монета в капсуле с сертификатом» — монета (заголовок начинается не с принадлежности)
+// «Буклеты разные к серии …» — до трёх слов между принадлежностью и «к/для»
+const ACCESSORY = /^\s*(?:сертификат|футляр|коробк|коробочк|капсул|буклет|упаковк|бланк|подложк|вкладыш)\p{L}*(?:[\s,]+[\p{L}-]+){0,3}?[\s,]+(?:к|для|от|на|из-под)(?!\p{L})|без\s+(?:самой\s+)?монет/iu;
+// раздел ay.by «Монеты › Беларусь (после 1991) › Буклеты, сертификаты» — надёжнее заголовка (виден со страницы лота)
+const ACCESSORY_SECTION = /буклет|сертификат/iu;
+
 function flagsFrom(title, description) {
   const t = `${title || ''}\n${description || ''}`;
   const flags = [];
@@ -419,10 +453,19 @@ function parseCoin({ title, sectionPath, conditionText, description, specs = {} 
   const mint = mintFrom(title);
   const foreign = denomKop == null ? foreignFrom(title, sectionPath, year) : null;
   const world = denomKop == null && !foreign ? worldFrom(title, sectionPath, specs) : null;
-  const metal = metalFrom(title, sectionPath, denomKop, year, specs['Металл'] || null, foreign);
+  const metal = metalFrom(title, sectionPath, denomKop, year, specs['Металл'] || null, foreign, world);
   const ay = gradeFromAyby(conditionText);
   const titleGrade = gradeFromTitle(title);
   const flags = flagsFrom(title, description);
+  // раздел ay.by «Монеты › Копии, новоделы» (и сувенирные): в заголовке «копия» продавцы часто не пишут
+  if (!flags.includes('копия') && COPY_SECTION.test(sectionPath || '')) flags.push('копия');
+  // сертификат или футляр без монеты: металла нет, в мониторы серебра и золота не попадает
+  if (ACCESSORY.test(title || '') || ACCESSORY_SECTION.test(sectionPath || '')) {
+    flags.push('не монета');
+    return { denomKop, denomination: null, year, ruler: null, mint: null, mintmaster: null, foreign: null, world: null, content: null,
+      metal: null, isSilver: false, isGold: false, isPrecious: false, conditionCode: ay.code || null, grade: null, gradeSource: null,
+      titleGrade, slab: null, weight: null, noReserve: NO_RESERVE.test(title || ''), flags };
+  }
   const slab = slabFrom(title, description);
   if (slab) flags.push('слаб');
   const weight = weightFrom(title, description, { denomKop, single: Boolean(foreign || world), isSet: flags.includes('несколько монет') });
@@ -467,11 +510,47 @@ const COLLECTION_HINTS = [
 ];
 const NOT_COLLECTION = /для\s+(?:монет|банкнот|бон)|пуст\p{L}*|без\s+монет|банкнот|(?<!\p{L})бон[аыу]?(?!\p{L})|купюр|значк|марк[аи]\s+почт|почтов|открыт/iu;
 
+// СССР 1961–1991, недрагметалл: номинал (коп.) → год → что искать. Деньги здесь не в типе, а в букве двора, цвете
+// металла (перепутка — монета на кружке другого номинала), гурте и редких годах. Цены — дилерская таблица raritetus
+// (без даты): 20 коп. 1991 без буквы 13,8–27,7 тыс. ₽, 5 и 10 коп. 1990 М до 26–30 тыс., белые 2/3 коп. 12–75 тыс.
+const USSR_VARIETIES = {
+  1: { 1963: 'приподнятый герб' },
+  2: { 1986: 'белая (на кружке 10 коп.)', 1988: 'белая (на кружке 10 коп.)', 1989: 'белая (на кружке 10 коп.)', 1990: 'белая (на кружке 10 коп.)', 1991: 'белая (на кружке 10 коп.)' },
+  3: { 1961: 'белая', 1971: 'без уступа на колосьях', 1983: 'белая', 1986: 'частый гурт', 1989: 'белая (на кружке 20 коп.)', 1990: 'белая (на кружке 20 коп.)', 1991: 'белая с буквой М' },
+  5: { 1970: 'редкий год', 1990: 'буква М' },
+  10: { 1987: '«колос не касается шара»', 1990: 'буква М', 1991: 'без буквы; жёлтая (на кружке 1 коп.)' },
+  15: { 1970: 'редкий год', 1980: '«волосатая»', 1987: '«лысая» (без остей)' },
+  20: { 1965: 'редкий год', 1970: 'редкий год', 1972: 'редкий год', 1986: 'жёлтая (на кружке 3 коп.)', 1989: 'жёлтая', 1990: 'жёлтая', 1991: 'без буквы; Л на кружке 15 коп.' },
+  50: { 1971: 'редкий год', 1986: 'гурт с годом 1985', 1988: 'гурт с годом 1987', 1989: 'гурт с годом 1988', 1990: 'на кружке 20 коп.' },
+  100: { 1967: 'гурт с годом 1966', 1984: 'ошибка («Ломоносов»)', 1986: '«шалаш»', 1990: 'гурт с годом 1989; ошибка («Лебедев»)' },
+};
+// Что искать у монеты СССР 1961–1991 (строка) или null — не из таблицы / драгметалл
+function ussrVariety(parsed) {
+  if (!parsed || parsed.isPrecious || !(parsed.year >= 1961 && parsed.year <= 1991)) return null;
+  return (USSR_VARIETIES[parsed.denomKop] || {})[parsed.year] || null;
+}
+
 function collectionHint(title, text = '') {
   const t = `${title || ''} ${text || ''}`;
   if (NOT_COLLECTION.test(title || '')) return null;
   const hit = COLLECTION_HINTS.find(([, re]) => re.test(t));
   return hit ? hit[0] : null;
+}
+
+// Kufar: серебро и золото в описании объявления, у которого заголовок ничего не говорит («Монеты разных стран»):
+// строки описания, где есть номинал или год и металл драгоценный («50 копеек 1924г. 15р.»). До max строк.
+function preciousLines(text, max = 5) {
+  const out = [];
+  for (const raw of String(text || '').split(/\n|;/)) {
+    const line = raw.replace(/\s+/g, ' ').trim();
+    if (!line || line.length > 150) continue;
+    const p = parseCoin({ title: line, sectionPath: null });
+    if (!p.isPrecious || p.flags.includes('копия')) continue;
+    if (p.denomKop == null && !p.foreign && !p.world && !p.year && !p.weight) continue;
+    out.push(line);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 // Почему лот нельзя присылать при любой цене (общее правило для ay.by, Kufar, отчёта и фото): копия; подборка,
@@ -481,6 +560,7 @@ function notifyBlocker(parsed, saleType = null) {
   if (!parsed) return 'не разобрано';
   const flags = parsed.flags || [];
   if (flags.includes('копия')) return 'копия';
+  if (flags.includes('не монета')) return 'не монета (сертификат, футляр)';
   if (flags.includes('несколько монет') && !parsed.weight) return 'подборка / несколько монет';
   if (parsed.slab && !/auction/.test(saleType || '')) return 'слаб по фиксированной цене (только аукционы)';
   return null;
@@ -493,6 +573,12 @@ function groupKeys(p) {
   if (p.denomKop == null) {
     // марки: «M3|1911|A|Пруссия» → «M3|1911|A» → «M3|1911» (памятные разных земель одного года не смешиваются, пока есть данные)
     const f = p.foreign;
+    // иностранные с известной страной («25 пенни (Финляндия) 1916», «5 злотых (Польша) 1934»): номинал и год
+    const w = p.world;
+    if (!f && w && w.country && p.year && p.year <= 1991) {
+      keys.push({ key: `W|${w.country}|${w.unit}${w.value}|${p.year}`, label: `${p.denomination} ${p.year}`, level: 'type' });
+      return keys;
+    }
     if (!f || !p.year) return keys;
     const d = p.denomination;
     if (f.mint && f.state) keys.push({ key: `${f.key}|${p.year}|${f.mint}|${f.state}`, label: `${d} ${p.year} ${f.mint}, ${f.state}`, level: 'variant' });
@@ -511,6 +597,6 @@ function groupKeys(p) {
 
 module.exports = {
   parseCoin, groupKeys, notifyBlocker, denominationFrom, denominationLabel, yearFrom, mintFrom, metalFrom,
-  gradeFromAyby, gradeFromTitle, flagsFrom, rulerFor, slabFrom, gradeTokenFrom, weightFrom, contentFrom, worldFrom, purityFrom, collectionHint,
-  GRADE_ORDER, AYBY_GRADES, SLAB_RAW_EQUIV,
+  gradeFromAyby, gradeFromTitle, flagsFrom, rulerFor, slabFrom, gradeTokenFrom, weightFrom, contentFrom, worldFrom, purityFrom, collectionHint, preciousLines, ussrVariety,
+  GRADE_ORDER, AYBY_GRADES, SLAB_RAW_EQUIV, COPY_SECTION,
 };

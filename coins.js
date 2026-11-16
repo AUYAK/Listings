@@ -11,9 +11,8 @@ const cstore = require('./coins/store');
 const ayby = require('./coins/ayby');
 const { parseCoin, notifyBlocker } = require('./coins/parse');
 const cmarket = require('./coins/market');
-const numista = require('./coins/numista');
+const { assessCoin } = require('./coins/assess');
 const photos = require('./coins/photos');
-const { metalValueLive } = require('./coins/metal');
 const favorites = require('./coins/favorites');
 const { SNIPE_SECONDS } = require('./coins/bid');
 const tg = require('./telegram');
@@ -23,7 +22,13 @@ const INTERVAL_MS = parseInt(process.env.COINS_INTERVAL_MS || '600000', 10); // 
 const PAGES = parseInt(process.env.COINS_PAGES || '3', 10);                  // страниц раздела за цикл
 const SEED_PAGES = parseInt(process.env.COINS_SEED_PAGES || '8', 10);        // при первом запуске
 const DETAIL_BATCH = 40;      // страниц новых лотов за цикл
-const BACKFILL_BATCH = 20;    // страниц старых лотов без подробностей за цикл
+const BACKFILL_BATCH = 40;    // страниц старых лотов без подробностей за цикл (сначала те, что кончаются раньше)
+// Глубокий проход (мониторы с deep: true): все страницы разделов, только карточки — по DEEP_PAGES страниц за цикл,
+// полный круг раз в DEEP_EVERY_MS. Лоты, выставленные до запуска, иначе не попадают в базу никогда.
+const DEEP_PAGES = parseInt(process.env.COINS_DEEP_PAGES || '40', 10);
+const DEEP_EVERY_MS = 24 * 3600e3;
+const LIST_CACHE_MS = 5 * 60e3; // страница списка, уже прочитанная другим монитором в этом цикле, не грузится снова
+const ASSESS_BATCH = 300;    // неоценённых лотов за цикл (по базе, без страниц; страница — только у выгодных)
 const FINALIZE_BATCH = 30;    // истёкших лотов за цикл
 const FINALIZE_GRACE_MIN = 10;
 const AUCTION_NOTIFY_HOURS = parseFloat(process.env.COINS_AUCTION_NOTIFY_HOURS || '12'); // чистые аукционы — только под конец
@@ -44,7 +49,7 @@ const SELLER_MAX_PAGES = parseInt(process.env.COINS_SELLER_MAX_PAGES || '15', 10
 // серебро, золото и лоты продавцов из мониторов с feed: true / sellers, сразу со страницей лота и решением.
 // Проход идёт и между циклами, и внутри цикла (между лотами). COINS_FEED_INTERVAL_MS=0 — выключить.
 const FEED_URL = process.env.COINS_FEED_URL || 'https://coins.ay.by/new/?order=create';
-const FEED_INTERVAL_MS = parseInt(process.env.COINS_FEED_INTERVAL_MS || '180000', 10);
+const FEED_INTERVAL_MS = parseInt(process.env.COINS_FEED_INTERVAL_MS || '90000', 10);
 const FEED_PAGES = parseInt(process.env.COINS_FEED_PAGES || '2', 10);
 const FEED_DETAIL_MAX = 25;  // страниц лотов за проход
 const FEED_SEEN_TTL_MS = 3 * 86400e3;
@@ -132,21 +137,27 @@ function notifyTiming(monitor, parsed, lot) {
   return 'now';
 }
 
-// Оценка лота: каталог (Numista, если есть ключ) + наша медиана по похожим; сохраняется в базе
-let rowsCache = { at: 0, rows: [] };
-async function assessLot(listingId, parsed, price, saleType = null) {
-  if (Date.now() - rowsCache.at > 5 * 60e3) rowsCache = { at: Date.now(), rows: await cstore.getCoinRows(null) };
-  // источники показываются в карточке раздельно; ориентир для «выгодно» — свежие продажи нашей базы, иначе самый
-  // низкий из источников с точным состоянием; стоимость металла — нижняя планка при любом состоянии
-  const { catalogs, type } = await cstore.getCatalogs(parsed).catch((err) => { console.warn(`[Catalog] ${err.message}`); return { catalogs: [], type: null }; });
-  if (parsed.isPrecious && !parsed.slab && !catalogs.some((c) => c.source === 'numista')) {
-    const n = await numista.lookup(parsed).catch((err) => { console.warn(`[Numista] ${err.message}`); return null; });
-    if (n) catalogs.push(n);
-  }
-  const metal = await metalValueLive(parsed).catch((err) => { console.warn(`[Metal] ${err.message}`); return null; });
-  const est = cmarket.assess({ parsed, price, rows: rowsCache.rows, excludeId: listingId, catalogs, coinType: type, metal, fixedPrice: saleType === 'buy_now' });
+// Оценка лота (coins/assess.js: архивы, Numista, наша база, металл); сохраняется в базе
+async function assessLot(listingId, parsed, price, saleType = null, text = {}) {
+  const est = await assessCoin({ parsed, price, excludeId: listingId, fixedPrice: saleType === 'buy_now', title: text.title, description: text.description });
   await cstore.saveEstimate(listingId, est).catch((err) => console.warn(`  [Estimate] save failed: ${err.message}`));
   return est;
+}
+
+// «🔁 Перевыставлен: 09.11 — 4 ставки до 50 р., мин. цена не пройдена; 02.11 — без ставок, старт 60 р.»
+// rounds — прошлые раунды лота (cstore.relistLot), последние два, свежий первым
+const bidsWord = (n) => (n % 10 === 1 && n % 100 !== 11 ? 'ставка' : [2, 3, 4].includes(n % 10) && ![12, 13, 14].includes(n % 100) ? 'ставки' : 'ставок');
+function roundsLine(rounds) {
+  if (!rounds || !rounds.length) return null;
+  const parts = rounds.slice(-2).reverse().map((r) => {
+    const when = r.ended_at ? new Date(r.ended_at).toLocaleDateString('ru-BY', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Minsk' }) : '?';
+    const bids = r.final_bids ?? r.bids ?? 0;
+    const last = r.final_price ?? r.last_price;
+    if (r.outcome === 'sold') return `${when} — продан за ${priceStr(last)} (видимо, не выкупили)`;
+    const what = bids ? `${bids} ${bidsWord(bids)}${last != null ? ` до ${priceStr(last)}` : ''}` : `без ставок${r.start_price != null ? `, старт ${priceStr(r.start_price)}` : ''}`;
+    return `${when} — ${what}${r.reserve === 'not_met' ? ', мин. цена не пройдена' : ''}`;
+  });
+  return `🔁 Перевыставлен${rounds.length > 1 ? ` (${rounds.length}-й раз)` : ''}: ${parts.join('; ')}`;
 }
 
 function buildCaption(monitor, lot, parsed, closing = false, est = null, fav = null, quiet = null) {
@@ -175,6 +186,7 @@ function buildCaption(monitor, lot, parsed, closing = false, est = null, fav = n
     lot.title || 'Без названия',
     priceLine + (saleLabel ? ` · ${saleLabel}` : ''),
     lot.endsAt ? `⏳ до ${fmtDate(lot.endsAt)} (${timeLeftStr(lot.endsAt)})` : null,
+    roundsLine(lot.rounds),
     grade,
     slabLine,
     coin ? `🔎 ${coin}` : null,
@@ -209,6 +221,7 @@ async function notifyLot(monitor, listingId, lot, parsed, closing = false, est =
   const fav = await addToFavorites(listingId, lot);
   const targets = await tg.resolveRecipients(monitor);
   if (!tg.isConfigured() || !targets.length) return 0;
+  lot.rounds = await cstore.lotRounds(listingId).catch(() => []);
   const caption = buildCaption(monitor, lot, parsed, closing, est, fav, quiet);
   let sent = 0;
   for (const chatId of targets) {
@@ -225,7 +238,7 @@ async function considerLot(monitor, listingId, lot, parsed, { closing = false } 
   const timing = notifyTiming(monitor, parsed, lot);
   if (timing === 'never') { await cstore.markNotified(listingId).catch(() => {}); return { action: 'skip' }; }
   if (timing === 'closing') return { action: 'wait' };
-  const est = await assessLot(listingId, parsed, lot.price, lot.saleType);
+  const est = await assessLot(listingId, parsed, lot.price, lot.saleType, { title: lot.title, description: lot.description });
   const quiet = cmarket.quietLot(est, lot);
   const reserveBlocks = lot.reserve === 'not_met';
   if (quiet || (timing === 'now' && est.isBargain && !reserveBlocks)) {
@@ -326,6 +339,26 @@ function listUrl(section, pageNo = 1) {
   return `${section}${sep}order=create${pageNo > 1 ? `&page=${pageNo}` : ''}`;
 }
 
+// Карточка списка нужна монитору: заголовок подходит под titleFilter; у мониторов с cardMetals — металл из metals
+// (строка карточки «Серебро, 1799» — поле «Металл» лота; нет — разбор заголовка) и не копия
+function cardWanted(monitor, card) {
+  if (monitor.titleFilter && !monitor.titleFilter.test(card.title || '')) return false;
+  if (!monitor.cardMetals) return true;
+  const p = parseCoin({ title: card.title, sectionPath: null, specs: card.short ? { 'Металл': card.short } : {} });
+  return monitor.metals.includes(p.metal) && !p.flags.includes('копия');
+}
+
+// Страница списка с кэшем на LIST_CACHE_MS: серебро и золото читают одни и те же разделы
+const listCache = new Map();
+async function loadList(page, url) {
+  const hit = listCache.get(url);
+  if (hit && Date.now() - hit.at < LIST_CACHE_MS) return hit.cards;
+  const cards = await ayby.scanListPage(page, url);
+  for (const [u, v] of listCache) if (Date.now() - v.at >= LIST_CACHE_MS) listCache.delete(u);
+  listCache.set(url, { at: Date.now(), cards });
+  return cards;
+}
+
 // Откуда монитор берёт карточки: разделы (страницы 1…pages, сначала новые) или страницы продавцов (все страницы
 // по 100 лотов, до SELLER_MAX_PAGES; короче 100 — последняя). load(i) — карточки i-й страницы (с нуля).
 async function cardSources(page, monitor, pages) {
@@ -337,7 +370,7 @@ async function cardSources(page, monitor, pages) {
     }));
   }
   const sections = await resolveSections(page, monitor);
-  return sections.map((section) => ({ section, maxPages: pages, pageSize: null, load: (i) => ayby.scanListPage(page, listUrl(section, i + 1)) }));
+  return sections.map((section) => ({ section, maxPages: pages, pageSize: null, load: (i) => loadList(page, listUrl(section, i + 1)) }));
 }
 
 // owners — external_id → мониторы, которые уже ведут лот (cstore.knownOwners); дополняется найденными за цикл.
@@ -358,20 +391,22 @@ async function scanMonitor(page, monitor, isFirstRun, owners = new Map()) {
       if (!cards.length) { if (i === 0) console.warn(`  [Scan] ${src.section}: карточек нет — раздел пуст или другая разметка (проверить: node debug-ayby.js "${src.section}")`); break; }
       for (const card of cards) {
         seen++;
-        if (monitor.titleFilter && !monitor.titleFilter.test(card.title || '')) { skipped++; continue; }
+        if (!cardWanted(monitor, card)) { skipped++; continue; }
+        const relisted = isMine(card.id) && await relistIfEnded(card, monitor.key);
         const { listingId } = await store.saveListing(monitor.key, listingFromCard(card));
         await cstore.upsertCard(listingId, monitor, src.section, card);
-        if (!isMine(card.id)) {
+        if (relisted) fresh.push({ listingId, card, section: src.section });
+        else if (!isMine(card.id)) {
           if (!owners.has(card.id)) owners.set(card.id, new Set());
           owners.get(card.id).add(monitor.key);
           fresh.push({ listingId, card, section: src.section });
         }
       }
-      await jitter(800);
+      await next(page); // лента не ждёт, пока прочитаются все разделы
       if (src.pageSize && cards.length < src.pageSize) break; // последняя страница продавца
     }
   }
-  console.log(`  [${monitor.name}] просмотрено ${seen} карточек${skipped ? ` (не подошли под фильтр заголовка: ${skipped})` : ''}, новых ${fresh.length}${seeding ? ' (засев, без уведомлений)' : ''}`);
+  console.log(`  [${monitor.name}] просмотрено ${seen} карточек${skipped ? ` (не подошли — металл, копия или фильтр заголовка: ${skipped})` : ''}, новых ${fresh.length}${seeding ? ' (засев, без уведомлений)' : ''}`);
   if (seeding) return;
 
   let notified = 0, matched = 0;
@@ -391,6 +426,43 @@ async function scanMonitor(page, monitor, isFirstRun, owners = new Map()) {
     await next(page);
   }
   console.log(`  [${monitor.name}] подробности: ${Math.min(fresh.length, DETAIL_BATCH)}, подходящих ${matched}, уведомлений ${notified}`);
+}
+
+// Лоты, которые дочитаны, но ни разу не оценены: засев первого запуска и дочитка (backfillDetails) читают страницу без
+// решения, цикл мог прерваться на таймаутах ay.by. Оценка — по данным базы, без загрузки страницы; страница
+// перечитывается и решение принимается как обычно (considerLot) только у тех, кто выглядит выгодным или тихим.
+// «Купить сейчас» без выгоды закрывается, аукционы дальше ждут проверки под конец торгов (notifyClosingSoon).
+async function assessPending(page, monitor) {
+  const rows = await cstore.lotsToAssess(monitor.key, ASSESS_BATCH);
+  if (!rows.length) return;
+  let assessed = 0, skipped = 0, candidates = 0, sent = 0;
+  for (const row of rows) {
+    const specs = row.specs || {};
+    const parsed = parseCoin({ title: row.title, sectionPath: row.category_path, conditionText: specs['Состояние'] || null, description: row.description, specs });
+    const lot = { ended: false, saleType: row.sale_type, categoryPath: row.category_path, bids: row.bids || 0, reserve: row.reserve,
+      endsAt: row.ends_at, price: row.current_price == null ? null : Number(row.current_price) };
+    if (!worthNotifying(monitor, parsed, lot)) { await cstore.markNotified(row.id).catch(() => {}); skipped++; continue; }
+    const est = await assessLot(row.id, parsed, lot.price, lot.saleType, { title: row.title, description: row.description });
+    assessed++;
+    if (!est.isBargain && !cmarket.quietLot(est, lot)) {
+      if (lot.saleType === 'buy_now') await cstore.markNotified(row.id).catch(() => {});
+      continue;
+    }
+    candidates++;
+    try {
+      const r = await fetchAndSave(page, row.id, row.url, row.section, { monitorKey: monitor.key, externalId: row.external_id });
+      ok();
+      if (r.gone || r.lot.ended) continue;
+      const d = await considerLot(monitor, row.id, r.lot, r.parsed);
+      if (d.sent) sent++;
+      logDecision(monitor, row.external_id, r.lot, r.parsed, d);
+    } catch (err) {
+      console.warn(`  [Assess] ${row.url}: ${err.message}`);
+      failed(err);
+    }
+    await next(page);
+  }
+  console.log(`  [Assess] ${monitor.name}: неоценённых ${rows.length} — оценено ${assessed}, не подходят ${skipped}, кандидатов ${candidates}, уведомлений ${sent}`);
 }
 
 async function backfillDetails(page, monitor) {
@@ -540,9 +612,73 @@ async function tidyPhotos() {
   }
 }
 
+// ---- Глубокий проход: все страницы разделов мониторов с deep: true ----
+// По DEEP_PAGES страниц за цикл, с того места, где остановились; карточки, подходящие монитору (cardWanted) и ещё
+// не известные, сохраняются без страницы лота — их дочитывает backfillDetails (сначала те, что кончаются раньше),
+// оценивает assessPending. Круг пройден — следующий через DEEP_EVERY_MS. Курсор в памяти: после перезапуска — заново.
+const deep = { urls: null, i: 0, pageNo: 1, doneAt: 0, found: 0, lastFirst: null };
+async function deepScan(page) {
+  const deepMons = monitors.filter((m) => m.deep);
+  if (!deepMons.length || (deep.doneAt && Date.now() - deep.doneAt < DEEP_EVERY_MS)) return;
+  if (!deep.urls) {
+    deep.urls = [...new Set(deepMons.flatMap((m) => m.sections.map((s) => s.url)))];
+    Object.assign(deep, { i: 0, pageNo: 1, found: 0 });
+    console.log(`  [Глубокий] начат круг: ${deep.urls.length} разделов`);
+  }
+  let read = 0;
+  while (read < DEEP_PAGES && deep.i < deep.urls.length) {
+    const section = deep.urls[deep.i];
+    const cards = await loadList(page, listUrl(section, deep.pageNo)).catch((err) => { failed(err); throw err; });
+    ok();
+    read++;
+    // за последней страницей ay.by снова отдаёт последнюю (page=5000 → 221): повтор первой карточки — конец раздела
+    if (!cards.length || cards[0].id === deep.lastFirst) { deep.i++; deep.pageNo = 1; deep.lastFirst = null; continue; }
+    deep.lastFirst = cards[0].id;
+    for (const card of cards) {
+      for (const monitor of deepMons) {
+        const owned = Boolean(owners.get(card.id) && owners.get(card.id).has(monitor.key));
+        if (owned && !(ended.get(card.id) && ended.get(card.id).has(monitor.key))) continue;
+        if (!cardWanted(monitor, card)) continue;
+        if (owned && !(await relistIfEnded(card, monitor.key))) continue; // перевыставлен — дочитает backfillDetails
+        const { listingId } = await store.saveListing(monitor.key, listingFromCard(card));
+        await cstore.upsertCard(listingId, monitor, section, card);
+        if (!owners.has(card.id)) owners.set(card.id, new Set());
+        owners.get(card.id).add(monitor.key);
+        deep.found++;
+      }
+    }
+    // последняя страница раздела короче полной (≈100 карточек) — дальше пусто
+    if (cards.length < 50) { deep.i++; deep.pageNo = 1; deep.lastFirst = null; } else deep.pageNo++;
+    await next(page); // 40 страниц — несколько минут: свежие лоты из ленты всё это время в приоритете
+  }
+  const where = deep.i < deep.urls.length ? `${deep.urls[deep.i].replace('https://coins.ay.by/', '')} стр. ${deep.pageNo}` : 'конец';
+  console.log(`  [Глубокий] прочитано страниц ${read}, найдено новых лотов за круг ${deep.found}; сейчас: ${where}`);
+  if (deep.i >= deep.urls.length) {
+    console.log(`  [Глубокий] круг пройден: новых лотов ${deep.found}, они дочитываются в «дочитке»`);
+    Object.assign(deep, { urls: null, doneAt: Date.now() });
+  }
+}
+
 // ---- Лента новых лотов ----
 // owners — external_id → мониторы, которые уже ведут лот: общая для цикла и ленты (обновляется в начале цикла)
 let owners = null;
+// Перевыставленные лоты: ay.by перевыставляет непроданный лот с тем же номером. Карточка в списке, а в базе итог
+// прошлого раунда — прошлый раунд в rounds (карточка покажет «🔁 Перевыставлен…»), лот ведётся заново.
+// ended — external_id → Map(monitor_key → listing_id), обновляется в начале цикла вместе с owners.
+let ended = new Map();
+let relistWarned = false;
+async function relistIfEnded(card, monitorKey) {
+  const byMonitor = ended.get(card.id);
+  const listingId = byMonitor && byMonitor.get(monitorKey);
+  if (!listingId) return false;
+  byMonitor.delete(monitorKey);
+  const ok = await cstore.relistLot(listingId, card).catch((err) => {
+    if (!relistWarned) { relistWarned = true; console.warn(`  [Перевыставлен] ${err.message} (применить migrations/016_coin_rounds.sql)`); }
+    return false;
+  });
+  if (ok) console.log(`  [Перевыставлен] [${card.id}] ${card.title} — снова в продаже, ведём заново`);
+  return ok;
+}
 const feedSeen = new Map(); // id карточки → когда лента её разобрала (подошла или нет), чтобы не открывать снова
 let lastFeedAt = 0;
 let feedBusy = false;
@@ -556,7 +692,8 @@ const sellerNicks = () => new Set(feedMonitors().flatMap((m) => (m.sellers || []
 function feedCandidate(card, nicks) {
   const nick = ayby.authorNick(card.author);
   if (nick && nicks.has(nick.toLowerCase())) return true;
-  if (FEED_HINT.test(card.title || '')) return true;
+  if (parseCoin({ title: card.title, sectionPath: null }).flags.includes('не монета')) return false;
+  if (FEED_HINT.test(card.title || '') || /серебр|золот/i.test(card.short || '')) return true;
   return parseCoin({ title: card.title, sectionPath: null }).isPrecious;
 }
 
@@ -567,7 +704,10 @@ function feedOwners(lot, parsed) {
 }
 
 async function scanFeed(page) {
-  if (!owners) owners = await cstore.knownOwners(monitors.map((m) => m.key));
+  if (!owners) {
+    owners = await cstore.knownOwners(monitors.map((m) => m.key));
+    ended = await cstore.endedLots(monitors.map((m) => m.key)).catch(() => new Map());
+  }
   const now = Date.now();
   for (const [id, at] of feedSeen) if (now - at > FEED_SEEN_TTL_MS) feedSeen.delete(id);
   const nicks = sellerNicks();
@@ -580,7 +720,7 @@ async function scanFeed(page) {
     let unknown = 0;
     for (const card of cards) {
       seen++;
-      if (feedSeen.has(card.id) || owners.has(card.id)) continue;
+      if (feedSeen.has(card.id) || (owners.has(card.id) && !(ended.get(card.id) && ended.get(card.id).size))) continue;
       unknown++;
       // кандидат помечается, когда его откроют: не влезший в FEED_DETAIL_MAX остаётся на следующий проход
       if (feedCandidate(card, nicks)) todo.push(card); else feedSeen.set(card.id, now);
@@ -596,7 +736,7 @@ async function scanFeed(page) {
       ok();
       if (r.gone) continue;
       for (const monitor of feedOwners(r.lot, r.parsed)) {
-        if (owners.get(card.id) && owners.get(card.id).has(monitor.key)) continue;
+        if (owners.get(card.id) && owners.get(card.id).has(monitor.key) && !(await relistIfEnded(card, monitor.key))) continue;
         const { listingId } = await store.saveListing(monitor.key, listingFromCard(card));
         await cstore.upsertCard(listingId, monitor, FEED_URL, card);
         await saveFetched(listingId, monitor.key, r.lot, r.parsed);
@@ -661,18 +801,24 @@ async function cycle(isFirstRun) {
     const page = await context.newPage();
     await favorites.open(browser).catch((err) => console.warn(`  [Favorites] контекст аккаунта не открыт: ${err.message}`));
     owners = await cstore.knownOwners(monitors.map((m) => m.key));
+    ended = await cstore.endedLots(monitors.map((m) => m.key)).catch((err) => { console.warn(`  [Перевыставлен] ${err.message}`); return new Map(); });
     for (const monitor of monitors) {
-      try {
-        await feedCheckpoint(page);
-        await scanMonitor(page, monitor, isFirstRun, owners);
-        await refreshClosing(page, monitor);   // сначала то, что вот-вот закончится
-        await finalizeEnded(page, monitor);
-        if (monitor.notify !== false) await notifyClosingSoon(page, monitor);
-        await backfillDetails(page, monitor);
-      } catch (err) {
-        console.error(`  [${monitor.name}] Error:`, err.message);
+      // шаги независимы: «ay.by не отвечает (3 подряд)» на скане раздела не должно отменять проверку аукционов под
+      // конец, итоги торгов и оценку уже прочитанных лотов (раньше весь монитор пропускался до следующего цикла)
+      const steps = [
+        ['лента', () => feedCheckpoint(page)],
+        ['раздел', () => scanMonitor(page, monitor, isFirstRun, owners)],
+        ['ставки под конец', () => refreshClosing(page, monitor)],
+        ['итоги', () => finalizeEnded(page, monitor)],
+        ['аукционы под конец', () => (monitor.notify !== false ? notifyClosingSoon(page, monitor) : null)],
+        ['оценка неоценённых', () => (monitor.notify !== false ? assessPending(page, monitor) : null)],
+        ['дочитка', () => backfillDetails(page, monitor)],
+      ];
+      for (const [name, step] of steps) {
+        try { await step(); } catch (err) { console.error(`  [${monitor.name}] ${name}: ${err.message}`); }
       }
     }
+    try { await deepScan(page); } catch (err) { console.error('  [Глубокий] Error:', err.message); }
     try { await refreshWinners(page); } catch (err) { console.error('  [Users] Error:', err.message); }
   } finally {
     await favorites.close();
@@ -700,4 +846,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildCaption, decideOutcome, worthNotifying, worthPhotos, notifyTiming, matchesMonitor, assessLot, considerLot, endsAtNight, listUrl, feedCandidate, feedOwners, AUCTION_NOTIFY_HOURS, PRECLOSE_MIN };
+module.exports = { buildCaption, roundsLine, cardWanted, decideOutcome, worthNotifying, worthPhotos, notifyTiming, matchesMonitor, assessLot, considerLot, endsAtNight, listUrl, feedCandidate, feedOwners, AUCTION_NOTIFY_HOURS, PRECLOSE_MIN };

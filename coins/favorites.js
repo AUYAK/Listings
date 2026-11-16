@@ -135,20 +135,26 @@ async function ensureLoggedIn(page) {
   loggedIn = true;
 }
 
-// Лот в избранном? Ищем id лота на странице избранного (ссылка на лот, element_id в ссылке удаления)
-// и на страницах списков, на которые она ссылается.
+// Лот в избранном? Ищем id лота на странице избранного (ссылка на лот, element_id в ссылке удаления), на страницах
+// списков и на следующих страницах (избранное бота растёт: когда лотов больше страницы, новый мог уйти на другую).
+// Ссылки — и абсолютные, и относительные; не больше FAV_MAX_PAGES страниц.
+const FAV_MAX_PAGES = 15;
 const idInHtml = (html, lotId) => html.includes(`-${lotId}.html`) || new RegExp(`(?:element_id|lot_id|lot|id)[=/:-]${lotId}(?!\\d)`).test(html);
 async function hasFavorite(page, lotId) {
-  await page.goto(FAVORITES_URL, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-  await assertNotVerification(page);
-  const html = await page.content();
-  if (idInHtml(html, lotId)) return true;
-  // списки избранного: favorite_lists.phtml?list_id=… / ?id=… — первые несколько
-  const lists = [...new Set((html.match(/https?:\/\/ay\.by\/personal\/favorite_lists\.phtml\?[^"'\s<>]+/g) || [])
-    .filter((u) => !/action=/.test(u)).map((u) => u.replace(/&amp;/g, '&')))].slice(0, 5);
-  for (const url of lists) {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-    if (idInHtml(await page.content(), lotId)) return true;
+  const queue = [FAVORITES_URL];
+  const seen = new Set(queue);
+  for (let n = 0; n < queue.length && n < FAV_MAX_PAGES; n++) {
+    await page.goto(queue[n], { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+    await assertNotVerification(page);
+    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {}); // список может догружаться скриптом
+    const html = await page.content();
+    if (idInHtml(html, lotId)) return true;
+    for (const m of html.matchAll(/(?:https?:\/\/ay\.by)?\/personal\/favorite_lists\.phtml\?[^"'\s<>]+/g)) {
+      const url = new URL(m[0].replace(/&amp;/g, '&'), 'https://ay.by').href;
+      if (/action=/.test(url) || seen.has(url)) continue;
+      seen.add(url);
+      queue.push(url);
+    }
   }
   return false;
 }
@@ -173,10 +179,16 @@ async function clickFavorite(page, lotUrl) {
     return { clicked: false, already: already > 0 };
   }
   const before = (await btn.innerText().catch(() => '')).trim();
+  // ответ ay.by на нажатие бывает окном alert («список переполнен» и т. п.): Playwright молча закрывает такие окна,
+  // поэтому текст запоминаем — он попадёт в причину неудачи
+  const dialogs = [];
+  const onDialog = (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); };
+  page.on('dialog', onDialog);
   await btn.click({ timeout: 10000 });
   await pause(2000);
+  page.off('dialog', onDialog);
   const after = (await btn.innerText().catch(() => '')).trim();
-  return { clicked: true, before, after, url: page.url() };
+  return { clicked: true, before, after, dialogs, url: page.url() };
 }
 
 // Добавить лот в избранное. Возвращает { ok, note }; никогда не бросает — уведомление важнее избранного.
@@ -195,7 +207,14 @@ async function add(lotUrl, lotId) {
     if (!r.clicked) return { ok: false, note: 'кнопка «В избранное» не найдена' };
     const ins = await insertFavorite(page, lotId, lotUrl);
     if (ins.status < 400 && await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено (запросом)' }; }
-    return { ok: false, note: `нажали кнопку, но в списке избранного лота нет (запрос: HTTP ${ins.status})` };
+    // что ответил сайт: окно после кнопки, текст кнопки, ответ запроса — по ним видно причину (лимит, сессия, защита)
+    const said = [
+      r.dialogs && r.dialogs.length ? `окно: «${r.dialogs.join(' / ').slice(0, 120)}»` : null,
+      r.after && r.after !== r.before ? `кнопка: «${r.before}» → «${r.after}»` : `кнопка не изменилась («${r.before}»)`,
+      `запрос: HTTP ${ins.status}${ins.body ? `, ответ «${ins.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)}»` : ''}`,
+    ].filter(Boolean).join('; ');
+    log(`${lotId}: не добавлено — ${said}`);
+    return { ok: false, note: `нажали кнопку, но в избранном лота нет (${said})` };
   } catch (err) {
     if (/вход не удался|verification/i.test(err.message)) loggedIn = false;
     return { ok: false, note: err.message };

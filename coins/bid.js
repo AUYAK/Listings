@@ -16,12 +16,12 @@ const CONFIRM_BUTTON = /Да,\s*сделать ставку/;
 const pause = (ms) => new Promise((r) => setTimeout(r, ms));
 const fmt = (n) => `${Number(n).toLocaleString('ru-RU', { maximumFractionDigits: 2 })} р.`;
 
-// «150», «150 р», «150,50 руб.», «макс 150», «до 150» → { max }; «отмена», «стоп», «0» → { cancel }; иначе null
+// «150», «150 р», «150,50 руб.», «макс 150», «мц 150», «до 150» → { max }; «отмена», «стоп», «0» → { cancel }; иначе null
 function parseBidReply(text) {
   const t = (text || '').trim().toLowerCase().replace(/ё/g, 'е');
   if (!t) return null;
   if (/^(?:отмена|отменить|отмени|стоп|нет|0)[.!]*$/.test(t)) return { cancel: true };
-  const m = t.match(/^(?:макс(?:имум)?\.?|до|ставка|снайп|max)?\s*(\d{1,3}(?:[  ]\d{3})+|\d{1,6}(?:[.,]\d{1,2})?)\s*(?:р\.?|руб\.?|рубл\p{L}*|byn|бел\.?\s*руб\.?)?[.!]*$/u);
+  const m = t.match(/^(?:макс(?:имум)?\.?|мц|до|ставка|снайп|max)?\s*(\d{1,3}(?:[  ]\d{3})+|\d{1,6}(?:[.,]\d{1,2})?)\s*(?:р\.?|руб\.?|рубл\p{L}*|byn|бел\.?\s*руб\.?)?[.!]*$/u);
   if (!m) return null;
   const max = Math.round(parseFloat(m[1].replace(/[  ]/g, '').replace(',', '.')) * 100) / 100;
   return max > 0 ? { max } : null;
@@ -58,7 +58,9 @@ async function readLotState(page) {
       if (/hidden|checkbox|radio|submit|button/.test(el.type)) continue;
       out.inputs.push({ name: el.name || '', id: el.id || '', type: el.type, value: el.value || '', placeholder: el.placeholder || '' });
     }
-    out.errorText = (body.match(/(?:Ставка должна быть|не менее|Недостаточно|Ошибка|Войдите|необходимо войти)[^.]{0,100}/i) || [null])[0];
+    // только ошибки ставки: «Войдите с помощью своего профиля Вконтакте…» — текст окна входа, которое есть на каждой
+    // странице и у вошедшего пользователя (2026-11-14: ставка прошла, а бот сообщил «не поставлена»)
+    out.errorText = (body.match(/(?:Ставка должна быть|Недостаточно|необходимо войти|Ошибка при|Ошибка:|Вы не можете)[^.]{0,100}/i) || [null])[0];
     return out;
   });
   const ended = Boolean(raw.soldText || raw.unsoldText) || raw.timerSeconds == null || raw.timerSeconds <= 0;

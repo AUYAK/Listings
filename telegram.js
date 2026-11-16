@@ -20,15 +20,21 @@ async function telegramRequest(method, body) {
 
 // Кто получает уведомления монитора: отметившие категорию в /settings; чаты, не открывавшие
 // настройки, — по config/.env, если монитор не optIn.
+// База недоступна — последний удачный список этого монитора; если его нет, никому: рассылка «всем из .env»
+// при сбое приходила и тем, кто снял категорию в /settings.
+const lastRecipients = new Map();
 async function resolveRecipients(monitor) {
   const legacy = monitor.optIn ? [] : (monitor.chatIds && monitor.chatIds.length ? monitor.chatIds : DEFAULT_CHAT_IDS);
   try {
     const [subscribers, configured] = await Promise.all([store.getSubscribers(monitor.key), store.getConfiguredChats()]);
     const legacyOnly = legacy.filter((id) => !configured.has(String(id)));
-    return [...new Set([...subscribers, ...legacyOnly].map(String))];
+    const ids = [...new Set([...subscribers, ...legacyOnly].map(String))];
+    lastRecipients.set(monitor.key, ids);
+    return ids;
   } catch (err) {
-    console.warn(`[Telegram] Could not load subscriptions (${err.message}), using config recipients`);
-    return legacy;
+    const cached = lastRecipients.get(monitor.key);
+    console.warn(`[Telegram] ${monitor.key}: подписки не прочитаны (${err.message}) — ${cached ? `последний список, ${cached.length} чат(ов)` : 'не отправляю'}`);
+    return cached || [];
   }
 }
 
