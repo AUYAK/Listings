@@ -116,7 +116,23 @@ async function snipe(row) {
     if (st.minBid != null && st.minBid > max) { await fail(row, `минимальная ставка уже ${bid.fmt(st.minBid)}, ваш максимум ${bid.fmt(max)}`); return; }
     if (!st.hasBidButton) { await fail(row, 'на странице нет кнопки «Сделать ставку»'); return; }
 
-    const r = await bid.placeBid(page, max, { beforeConfirm: () => sleepUntil(deadline - SNIPE * 1000, 200) });
+    // Ошибка до подтверждения (не появилось окно «Да, сделать ставку», не нашлась кнопка или поле) — ставка не ушла:
+    // перечитать лот и попробовать ещё раз, если до конца есть время. После нажатия «Да» не повторяем.
+    let r;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        r = await bid.placeBid(page, max, { beforeConfirm: () => sleepUntil(deadline - SNIPE * 1000, 200) });
+        break;
+      } catch (err) {
+        const beforeConfirm = /не появилось подтверждение|не найден/.test(err.message);
+        if (!beforeConfirm || attempt >= 3 || deadline - Date.now() < 15000) throw err;
+        log(`[${row.external_id}] попытка ${attempt}: ${err.message} — перечитываю лот и пробую ещё раз`);
+        st = await bid.openLot(page, row.url);
+        if (st.ended) { await report(row, st); return; }
+        deadline = Date.now() + st.remaining * 1000;
+        if (st.minBid != null && st.minBid > max) { await fail(row, `минимальная ставка уже ${bid.fmt(st.minBid)}, ваш максимум ${bid.fmt(max)}`); return; }
+      }
+    }
     const left = Math.round((deadline - r.clickedAt.getTime()) / 1000);
     await favorites.saveSession();
     if (!r.ok) {

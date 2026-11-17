@@ -32,7 +32,7 @@ function stripStartBid(t) {
 function denominationFrom(title) {
   const t = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е'));
   // дробные: «1/2 копейки», «1/4 копейки», «½ копейки» — иначе «2 копейки» ловится из «1/2»
-  const frac = t.match(/(?:(1)\s*\/\s*([24])|½|¼)\s*коп/u);
+  const frac = t.match(/(?:(1)\s*[\/\\]\s*([24])|½|¼)\s*коп/u);
   if (frac) return frac[2] ? 1 / parseInt(frac[2], 10) : (frac[0].startsWith('½') ? 0.5 : 0.25);
   // «7 рублей 50 копеек» (золото 1897) → 750
   const rk = t.match(/(?<![\d\/])(\d+)\s*руб\p{L}*\s+(\d{1,2})\s*коп/u);
@@ -88,9 +88,9 @@ function foreignFrom(title, sectionPath, year) {
   if (NOT_COIN.test(t)) return null; // нотгельды, банкноты — бумага, не монеты
   if (!GERMAN_HINT.test(t) && !/германи/i.test(sectionPath || '')) return null;
   // «1 / 2 марки» с пробелами — половина марки, а не «2 марки» (ay.by 5041902713)
-  const m = t.match(/(?<![\d\/.,]|\/\s+)(\d+(?:[.,]\d+)?|½|1\s*\/\s*2)\s*(рейхс?\s*мар\p{L}*|марк\p{L}*|марок|пфен+и?н?г\p{L}*)/u);
+  const m = t.match(/(?<![\d\/\\.,]|[\/\\]\s+)(\d+(?:[.,]\d+)?|½|1\s*[\/\\]\s*2)\s*(рейхс?\s*мар\p{L}*|марк\p{L}*|марок|пфен+и?н?г\p{L}*)/u);
   if (!m) return null;
-  const value = m[1] === '½' || /^1\s*\/\s*2$/.test(m[1]) ? 0.5 : parseFloat(m[1].replace(',', '.'));
+  const value = m[1] === '½' || /^1\s*[\/\\]\s*2$/.test(m[1]) ? 0.5 : parseFloat(m[1].replace(',', '.'));
   if (!(value > 0 && value <= 1000)) return null;
   const unit = /^пф/.test(m[2]) ? 'пфенниг' : 'марка';
   // буква двора отдельно после года: «1911 A», «1911A», «1904 А» (кириллица), «1913 г. A», «1926 год. F», «1910 год, " F "»;
@@ -264,7 +264,7 @@ function contentFrom(title, description, specs = {}) {
   const gm = specW.match(/(\d+(?:[.,]\d+)?)/) || (title || '').match(GROSS) || (description || '').match(GROSS);
   const grams = gm ? parseFloat(gm[1].replace(',', '.')) : gramsFrom(title); // «3 рубля 1995 Ag 900 34,88 г»
   if (!(grams > 0.5 && grams <= 1100)) return null;
-  return { fineGrams: Math.round(grams * purity * 100) / 100, basis: `${fmtG(grams)} г × проба ${Math.round(purity * 1000)}` };
+  return { fineGrams: Math.round(grams * purity * 100) / 100, basis: require('./metal').purityBasis(grams, purity) };
 }
 
 // ---- Иностранные номиналы (кроме марок): для таблицы содержания металла (coins/metal.js WORLD) ----
@@ -275,11 +275,15 @@ const WORLD_UNITS = [
   // Финляндия в составе Империи: «25 pennia 1916», «50 пенни 1916 S», «1 markka 1915», «20 марок 1913» (германские
   // марки разбирает раньше foreignFrom — по слову «Германия»/земле или разделу)
   ['пенни', /пенни\p{L}*|penni\p{L}*/u], ['марка', /мар(?:ка|ки|ок)(?!\p{L})|markk\p{L}*/u],
+  // Великобритания: «1 шиллинг 1943», «6 пенсов 1936»
+  ['шиллинг', /шиллинг\p{L}*|shillings?(?!\p{L})/u], ['пенс', /пенс(?:а|ов)?(?!\p{L})|pence(?!\p{L})/u],
 ];
 const WORLD_WORDS = [
   [/полсоверен|1\/2\s*соверен|half\s*sovereign/u, 'соверен', 0.5], [/(?<!\p{L})соверен|sovereign/u, 'соверен', 1],
   [/полдоллар|half\s*dollar/u, 'цент', 50], [/квотер|quarter/u, 'цент', 25], [/(?<!\p{L})(?:дайм|dime)(?!\p{L})/u, 'цент', 10],
   [/морган|morgan|peace\s*dollar/u, 'доллар', 1], [/крюгерр?анд|krugerrand/u, 'крюгерранд', 1],
+  [/полкрон|half\s*crown/u, 'крона', 0.5], [/(?<!\p{L})crown(?!\p{L})/u, 'крона', 1],
+  [/(?<!\p{L})(?:флорин|florin)/u, 'шиллинг', 2], [/sixpence|шестипенс/u, 'пенс', 6], [/threepence|тр[её]хпенс/u, 'пенс', 3],
 ];
 const COUNTRIES = [
   ['США', /(?<!\p{L})(?:сша|usa)(?!\p{L})|соединенн\p{L}*\s+штат|морган|morgan|кеннеди|kennedy|peace\s*dollar/iu],
@@ -301,8 +305,8 @@ function worldFrom(title, sectionPath, specs = {}) {
   const t = stripStartBid(`${title || ''} ${specs['Номинал'] || ''}`.toLowerCase().replace(/ё/g, 'е'));
   let unit = null, value = null;
   for (const [u, re] of WORLD_UNITS) {
-    const m = t.match(new RegExp(`(?<![\\d\\/.,]|\\/\\s+)(\\d+(?:[.,]\\d+)?|1\\s*\\/\\s*2|½)\\s*(?:${re.source})`, 'u'));
-    if (m) { unit = u; value = fracValue(m[1].replace(/\s/g, '')); break; }
+    const m = t.match(new RegExp(`(?<![\\d\\/\\\\.,]|[\\/\\\\]\\s+)(\\d+(?:[.,]\\d+)?|1\\s*[\\/\\\\]\\s*2|½)\\s*(?:${re.source})`, 'u'));
+    if (m) { unit = u; value = fracValue(m[1].replace(/\s/g, '').replace('\\', '/')); break; }
   }
   if (!unit) for (const [re, u, v] of WORLD_WORDS) if (re.test(t)) { unit = u; value = v; break; }
   if (!unit) return null;
@@ -375,13 +379,19 @@ function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign
   if (/медь|медн/.test(s) || /медь|медн|copper/.test(t)) return 'copper';
   // Екатеринбург, Сузун, Аннинск, Таврида, Ижора чеканили медь: знак двора в заголовке = медная монета
   if (/(?<!\p{L})(ЕМ|КМ|АМ|ТМ|ИМ)(?!\p{L})/u.test((title || '').toUpperCase())) return 'copper';
-  // СССР: серебро — 10/15/20 коп 1921–1931, полтинники 1921–1927, рубли 1921–1924
-  if (year >= 1921 && year <= 1931 && [10, 15, 20].includes(denomKop)) return 'silver';
+  // СССР: серебро 500 пробы — 10/15/20 коп 1921–1930, полтинники 1921–1927, рубли 1921–1924. 10/15/20 коп 1931 —
+  // массово медно-никелевые, серебряные 1931 — редкость: серебро только по слову в заголовке или поле «Металл»
+  if (year >= 1921 && year <= 1930 && [10, 15, 20].includes(denomKop)) return 'silver';
   if (year >= 1921 && year <= 1927 && denomKop === 50) return 'silver';
   if (year >= 1921 && year <= 1924 && denomKop === 100) return 'silver';
-  // СССР: червонец 1923 и «Сеятель» 1975–1982 — золото
+  // СССР, Олимпиада-80 (1977–1980): 5 и 10 рублей — серебро (16,67 и 33,3 г 900, тиражи — миллионы), 50 и 100 — золото.
+  // «Сеятель» 10 рублей 1975–1982 — золото, но в 1977–1980 под тем же номиналом и олимпийское серебро
+  // (ay.by 5041865834 «10 рублей 1978 прыжки с шестом» считался золотом на 2 876 р.): там золото — только по слову
+  if (year >= 1977 && year <= 1980 && (denomKop === 500 || denomKop === 1000)) return /сеятел|червон/.test(t) ? 'gold' : 'silver';
+  if (year >= 1977 && year <= 1980 && (denomKop === 5000 || denomKop === 10000)) return 'gold';
+  // СССР: червонец 1923 и «Сеятель» 1975–1976, 1981–1982 — золото
   if (denomKop === 1000 && (year === 1923 || (year >= 1975 && year <= 1982))) return 'gold';
-  if (year >= 1932 && year <= 1991 && denomKop != null && denomKop <= 100) return 'base';
+  if (year >= 1931 && year <= 1991 && denomKop != null && denomKop <= 100) return 'base';
   // Империя: рубли/полтины/25/20/15/10/5 коп с 1867 — серебро (5 коп серебряные до 1915 в билоне)
   if (year >= 1700 && year <= 1917 && [100, 50, 25, 20, 15, 10, 5].includes(denomKop) && !/медь|медн/.test(t)) return 'silver';
   // Империя: 3, 5, 7½, 10, 15, 25, 37½ рублей — только золото (серебряных монет таких номиналов не было)
@@ -394,6 +404,10 @@ function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign
     const row = FINLAND_METAL.find(([u, v, from, to]) => u === world.unit && v === world.value && year >= from && year <= to);
     if (row) return row[4];
   }
+  // Великобритания до 1946: кроны, полукроны, флорины, шиллинги, 6 пенсов — серебро (3 пенса с 1937 бывают латунные —
+  // только по слову). С 1947 — медно-никель
+  if (world && world.country === 'Великобритания' && year >= 1816 && year <= 1946
+    && (['крона', 'шиллинг'].includes(world.unit) || (world.unit === 'пенс' && world.value === 6))) return 'silver';
   return null;
 }
 

@@ -359,12 +359,64 @@ async function applyBidOrder(msg, chatId, lot, order, liveState) {
   await reply(msg, `🎯 Снайп: до <b>${bid.fmt(order.max)}</b> на «${escHtml(lot.title)}».\nСейчас ${price != null ? bid.fmt(price) : '?'}${min != null ? ` (мин. ставка ${bid.fmt(min)})` : ''} · ${bidsNow} ставок · до ${lot.ends_at ? fmtDate(lot.ends_at) : '?'}.\nБот поставит максимум за ${bid.SNIPE_SECONDS} с до конца и отчитается. Изменить или отменить: то же сообщение с другим числом или «отмена» (ответом на карточку или вместе со ссылкой).`);
 }
 
+// /bids: активные заявки со свежим состоянием каждой страницы лота (цена, мин. ставка, конец — и в базу), плюс итоги
+// за неделю. «Перебита» — минимальная ставка уже выше вашего максимума: снайпер ставить не будет, поднимите максимум.
 async function sendBids(chatId) {
-  const rows = await cstore.openBids(chatId);
-  if (!rows.length) { await tg('sendMessage', { chat_id: chatId, text: 'Активных заявок нет. Ответьте на карточку лота ay.by числом — это максимальная ставка. Или пришлите ссылку на лот и максимум: «https://ay.by/lot/… 120».' }); return; }
-  const st = { pending: '⏳ ждёт', running: '🎯 в работе', placed: '✅ поставлена' };
-  const lines = rows.map((r) => `${st[r.status] || r.status} до ${bid.fmt(r.max_byn)} — <a href="${r.url}">${r.title}</a>, сейчас ${bid.fmt(r.current_price)}, конец ${r.ends_at ? fmtDate(r.ends_at) : '?'}`);
-  await tg('sendMessage', { chat_id: chatId, text: lines.join('\n'), parse_mode: 'HTML', disable_web_page_preview: true });
+  const send = async (lines) => {
+    // лимит сообщения Telegram 4096 символов — режем по строкам
+    let chunk = '';
+    for (const l of lines) {
+      if (chunk && chunk.length + l.length + 1 > 3800) { await tg('sendMessage', { chat_id: chatId, text: chunk, parse_mode: 'HTML', disable_web_page_preview: true }); chunk = ''; }
+      chunk += (chunk ? '\n' : '') + l;
+    }
+    if (chunk) await tg('sendMessage', { chat_id: chatId, text: chunk, parse_mode: 'HTML', disable_web_page_preview: true });
+  };
+  const open = await cstore.openBids(chatId);
+  const done = await cstore.recentBids(chatId, 7).catch(() => []);
+  if (!open.length && !done.length) {
+    await tg('sendMessage', { chat_id: chatId, text: 'Заявок нет. Ответьте на карточку лота ay.by числом — это максимальная ставка. Или пришлите ссылку на лот и максимум: «https://ay.by/lot/… 120».' });
+    return;
+  }
+  await tg('sendChatAction', { chat_id: chatId, action: 'typing' }).catch(() => {});
+  const lines = [];
+  if (open.length) lines.push(`<b>🎯 Активные заявки (${open.length})</b>`);
+  for (const r of open) {
+    const live = await liveBidState(r.url);
+    // закончился раньше срока (выкупили «купить сейчас», сняли) — срок в базе = сейчас: снайпер заберёт заявку
+    // в ближайший опрос и пришлёт итог, а не ждёт плановый конец
+    const endedEarly = live && live.title && live.ended && r.ends_at && new Date(r.ends_at) > Date.now();
+    if (live && live.title) await cstore.touchEndsAt(r.listing_id, endedEarly ? new Date() : live.endsAt, live.price, live.bids).catch(() => {});
+    const price = live && live.price != null ? live.price : Number(r.current_price);
+    const ends = live && live.endsAt ? live.endsAt : r.ends_at;
+    const max = Number(r.max_byn);
+    const ended = live && live.title && live.ended;
+    const outbid = !ended && live && live.min != null && live.min > max;
+    // не поставлена, а торги идут и максимума хватает — перезапустить: снайпер возьмёт её снова под конец
+    let restarted = false;
+    if (r.status === 'failed' && live && live.title && !ended && !outbid) {
+      await cstore.setBid(r.listing_id, chatId, max);
+      console.log(`[Bids] chat=${chatId} lot ${r.external_id}: заявка до ${max} перезапущена из /bids (была ошибка: ${String(r.note || '').split('\n')[0].slice(0, 100)})`);
+      restarted = true;
+    }
+    const icon = ended ? '🏁' : restarted ? '🔄' : r.status === 'failed' ? '⚠️' : outbid ? '❗' : { pending: '⏳', running: '🎯', placed: '✅' }[r.status] || '•';
+    // причина — первая строка, без технического хвоста Playwright («Call log: …»)
+    const why = String(r.note || '').split(/\n|Call log/)[0].replace(/^locator\.waitFor: Timeout \d+ms exceeded\.?/, 'не дождались окна подтверждения ставки').trim().slice(0, 120);
+    const state = ended ? (endedEarly ? 'закончился досрочно (выкупили или сняли) — итог от снайпера в течение минуты' : 'торги закончились, итог придёт от снайпера')
+      : restarted ? `перезапущена — в прошлый раз не поставилась${why ? ` (${escHtml(why)})` : ''}, снайпер попробует снова под конец`
+      : r.status === 'failed' ? `не поставлена${why ? ` (${escHtml(why)})` : ''} — пришлите ссылку и число ещё раз, бот перезапустит`
+        : outbid ? `перебита: мин. ставка ${bid.fmt(live.min)} выше вашего максимума — поднимите или «отмена»`
+          : { pending: 'ждёт', running: 'в работе', placed: 'поставлена' }[r.status] || r.status;
+    lines.push(`${icon} до <b>${bid.fmt(max)}</b> · сейчас ${bid.fmt(price)}${live && live.bids != null ? ` (${live.bids} ст.)` : ''} · конец ${ends ? fmtDate(ends) : '?'}${live ? '' : ' · страница не открылась, цена из базы'}\n   <a href="${r.url}">${escHtml(r.title)}</a> — ${state}`);
+  }
+  if (done.length) {
+    lines.push('', `<b>🏁 Итоги за неделю (${done.length})</b>`);
+    const st = { won: '🏆 выиграна', lost: '❌ проиграна', failed: '⚠️ не поставлена', cancelled: '🚫 отменена' };
+    for (const r of done) {
+      const result = r.final_price != null ? `, ушёл за ${bid.fmt(r.final_price)}${r.winner ? ` (${escHtml(r.winner)})` : ''}` : '';
+      lines.push(`${st[r.status] || r.status} · до ${bid.fmt(r.max_byn)}${result} · ${r.ends_at ? fmtDate(r.ends_at) : ''}\n   <a href="${r.url}">${escHtml(r.title)}</a>`);
+    }
+  }
+  await send(lines);
 }
 
 async function handleCallback(cb) {

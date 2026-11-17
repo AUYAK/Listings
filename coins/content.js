@@ -8,7 +8,7 @@
 const { pool } = require('../store');
 const numista = require('./numista');
 const vision = require('./vision');
-const { fineContent } = require('./metal');
+const { fineContent, purityBasis } = require('./metal');
 
 const LOOKUP = process.env.COINS_CONTENT_LOOKUP !== '0';
 const MODEL_PER_DAY = parseInt(process.env.COINS_CONTENT_MODEL_PER_DAY || '100', 10); // предел запросов к модели в сутки
@@ -79,7 +79,8 @@ async function fromModel(parsed, title, description) {
   if (!(fine >= 0.3 && fine <= 1100)) return null;
   // вес × проба должны сходиться с чистым весом — иначе ответ невнятный
   if (a.weight_g > 0 && a.purity > 0 && Math.abs(a.weight_g * a.purity - fine) / fine > 0.05) return null;
-  return { fineGrams: Math.round(fine * 100) / 100, basis: `по модели: ${a.coin} — проверьте вес`, guess: true };
+  const how = a.weight_g > 0 && a.purity > 0 ? `, ${purityBasis(a.weight_g, a.purity)}` : '';
+  return { fineGrams: Math.round(fine * 100) / 100, basis: `по модели: ${a.coin}${how} — проверьте вес`, guess: true };
 }
 
 // { fineGrams, basis } или null. Ошибки источников не роняют оценку: шаг пропускается.

@@ -62,9 +62,22 @@ const GERMAN = [
   [5, 1874, 1915, 'silver', 25.0], [1, 1925, 1927, 'silver', 2.5], [2, 1925, 1939, 'silver', 5.0], [3, 1924, 1933, 'silver', 7.5],
   [5, 1925, 1939, 'silver', 12.5], [10, 1871, 1915, 'gold', 3.58], [20, 1871, 1915, 'gold', 7.17],
 ];
-// Иностранные монеты (parse.worldFrom): [страна или null — любая, единица, номинал, год от, год до, металл, грамм].
-// Применяется только если металл монеты уже известен (поле «Металл» ay.by или заголовок): «20 лир» 1970-х — не золото.
+// «14,14 г × проба 500 (билон)» — как посчитан чистый металл; билон — проба 500 и ниже (половина и больше — медь)
+function purityBasis(grams, purity) {
+  const mil = Math.round(purity * 1000);
+  return `${String(Math.round(grams * 100) / 100).replace('.', ',')} г × проба ${mil}${mil <= 500 ? ' (билон)' : ''}`;
+}
+
+// Великобритания: серебро 925 (1816–1919), 500 (1920–1946), с 1947 — медно-никель. [единица, номинал, вес монеты]
+const UK_SILVER = [['крона', 1, 28.28], ['крона', 0.5, 14.14], ['шиллинг', 2, 11.31], ['шиллинг', 1, 5.65], ['пенс', 6, 2.83], ['пенс', 3, 1.41]];
+const UK = UK_SILVER.flatMap(([unit, value, gross]) => [[1816, 1919, 0.925], [1920, 1946, 0.5]].map(([from, to, purity]) =>
+  ['Великобритания', unit, value, from, to, 'silver', Math.round(gross * purity * 100) / 100, purityBasis(gross, purity)]));
+
+// Иностранные монеты (parse.worldFrom): [страна или null — любая, единица, номинал, год от, год до, металл, грамм,
+// пояснение — необязательно]. Применяется только если металл монеты уже известен (поле «Металл» ay.by, заголовок или
+// правило года в parse.metalFrom): «20 лир» 1970-х — не золото.
 const WORLD = [
+  ...UK,
   ['США', 'доллар', 1, 1878, 1935, 'silver', 24.06], ['США', 'доллар', 1, 1986, 2100, 'silver', 31.1], // Морган/Пис; Silver Eagle
   ['США', 'цент', 50, 1892, 1964, 'silver', 11.25], ['США', 'цент', 50, 1965, 1970, 'silver', 4.6],
   ['США', 'цент', 25, 1892, 1964, 'silver', 5.62], ['США', 'цент', 10, 1892, 1964, 'silver', 2.25],
@@ -109,7 +122,7 @@ function fineContent(parsed) {
   if (w) {
     const row = WORLD.find(([c, u, v, from, to, m]) => u === w.unit && v === w.value && m === parsed.metal && (!c || c === w.country)
       && (!parsed.year || (parsed.year >= from && parsed.year <= to)) && (parsed.year || c === null));
-    if (row) return { metal: parsed.metal, grams: row[6] };
+    if (row) return { metal: parsed.metal, grams: row[6], ...(row[7] ? { basis: row[7] } : {}) };
   }
   if (parsed.content && parsed.content.fineGrams > 0) return { metal: parsed.metal, grams: parsed.content.fineGrams, basis: parsed.content.basis };
   if (parsed.denomKop != null) {
@@ -137,4 +150,4 @@ async function metalValueLive(parsed) {
   return metalValue(parsed, prices);
 }
 
-module.exports = { fineContent, metalValue, metalValueLive, SILVER, GOLD, MODERN_SILVER, MODERN_GOLD, GERMAN, WORLD };
+module.exports = { fineContent, metalValue, metalValueLive, purityBasis, SILVER, GOLD, MODERN_SILVER, MODERN_GOLD, GERMAN, WORLD };

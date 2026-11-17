@@ -4,6 +4,7 @@
 // /types?q=… → /types/{id}/issues → /types/{id}/issues/{issue_id}/prices. Формат ответов проверяется защитно.
 const { pool } = require('../store');
 const { toByn } = require('./rates');
+const { purityBasis } = require('./metal');
 
 const KEY = process.env.NUMISTA_API_KEY || '';
 const BASE = 'https://api.numista.com/api/v3';
@@ -136,13 +137,13 @@ async function contentFor(parsed) {
     if (!(parsed.metal === 'gold' ? /gold/i : /silver|billon/i).test(comp)) continue; // тот же номинал в другом металле — не наш
     const fine = fineFromType(full, parsed.metal);
     if (!fine) return null; // серебро без пробы или веса — не угадываем
-    found.push({ fine, title: full.title || t.title, issuer: full.issuer && full.issuer.name });
+    found.push({ fine, weight: parseFloat(full.weight), title: full.title || t.title, issuer: full.issuer && full.issuer.name });
   }
   if (!found.length) return null;
   const min = Math.min(...found.map((f) => f.fine)), max = Math.max(...found.map((f) => f.fine));
   if (max / min > 1.03) return null;
-  const f = found[0];
-  return { fineGrams: min, basis: `по Numista: ${f.issuer ? `${f.issuer}, ` : ''}${f.title}` };
+  const f = found.find((x) => x.fine === min);
+  return { fineGrams: min, basis: `по Numista: ${f.issuer ? `${f.issuer}, ` : ''}${f.title}, ${purityBasis(f.weight, f.fine / f.weight)}` };
 }
 
 module.exports = { lookup, typeKey, pickIssue, contentFor, fineFromType, isConfigured: () => Boolean(KEY) };

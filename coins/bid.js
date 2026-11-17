@@ -105,7 +105,23 @@ async function placeBid(page, amount, { confirm = true, beforeConfirm = null } =
   await btn.click({ timeout: 10000 });
   let yes = page.locator('button[data-form="#lot-rate-form"]').first();
   if (!(await yes.count())) yes = page.getByText(CONFIRM_BUTTON).first();
-  await yes.waitFor({ timeout: 10000 });
+  // подтверждение не появилось — понятная причина вместо «locator.waitFor: Timeout…»: ошибка ставки на странице
+  // или текст открытого окна (ay.by мог показать другое окно: ограничения продавца, вход и т. п.)
+  await yes.waitFor({ timeout: 10000 }).catch(async () => {
+    const st = await readLotState(page).catch(() => null);
+    const popup = await page.evaluate(() => {
+      const els = document.querySelectorAll('[class*="popup"], [class*="modal"], [role="dialog"]');
+      for (let i = 0; i < els.length; i++) {
+        const el = els[i];
+        const r = el.getBoundingClientRect();
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (r.width > 0 && r.height > 0 && t && !/Войдите с помощью/.test(t)) return t.slice(0, 160);
+      }
+      return '';
+    }).catch(() => '');
+    const why = (st && st.errorText) || popup;
+    throw new Error(`после «Сделать ставку» не появилось подтверждение «Да, сделать ставку»${why ? ` — на странице: «${why}»` : ''}`);
+  });
   const consent = (await page.getByText(/Я согласен с правилами/).first().innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
   // если в подтверждении есть чекбокс согласия — отметить
   const boxes = page.locator('input[type="checkbox"]');

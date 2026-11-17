@@ -546,22 +546,38 @@ async function bidsDue(minutes) {
   return res.rows;
 }
 
-// Все активные заявки чата (для /bids)
+// Активные заявки чата (для /bids): ждут, в работе, поставлены — и не поставленные, у которых торги ещё идут
+// (их можно перезапустить тем же сообщением со ссылкой и числом)
 async function openBids(chatId) {
   const res = await pool.query(
     `SELECT b.*, l.external_id, l.url, l.title, a.ends_at, a.current_price, a.bids
      FROM listings.coin_bids b
      JOIN listings.listings l ON l.id = b.listing_id
      JOIN listings.coin_lots a ON a.listing_id = b.listing_id
-     WHERE b.chat_id = $1 AND b.status IN ('pending', 'running', 'placed')
+     WHERE b.chat_id = $1 AND (b.status IN ('pending', 'running', 'placed') OR (b.status = 'failed' AND a.ends_at > NOW()))
      ORDER BY a.ends_at ASC NULLS LAST`,
     [String(chatId)]
   );
   return res.rows;
 }
 
+// Завершённые заявки чата за days дней (для /bids): выиграно, проиграно, не поставлено, отменено
+async function recentBids(chatId, days = 7) {
+  const res = await pool.query(
+    `SELECT b.*, l.external_id, l.url, l.title, a.ends_at, a.final_price, a.winner, a.outcome
+     FROM listings.coin_bids b
+     JOIN listings.listings l ON l.id = b.listing_id
+     JOIN listings.coin_lots a ON a.listing_id = b.listing_id
+     WHERE b.chat_id = $1 AND b.status IN ('won', 'lost', 'failed', 'cancelled') AND NOT (b.status = 'failed' AND a.ends_at > NOW())
+       AND b.updated_at > NOW() - ($2 || ' days')::interval
+     ORDER BY COALESCE(a.ends_at, b.updated_at) DESC`,
+    [String(chatId), String(days)]
+  );
+  return res.rows;
+}
+
 module.exports = {
-  lotByMessage, lotByExternalId, saveManualLot, reviveLot, endedLots, relistLot, lotRounds, setBid, cancelBid, getBid, updateBid, bidsDue, openBids,
+  lotByMessage, lotByExternalId, saveManualLot, reviveLot, endedLots, relistLot, lotRounds, setBid, cancelBid, getBid, updateBid, bidsDue, openBids, recentBids,
   upsertCard, saveLotDetails, recordOutcome, touchEndsAt, lotsToAssess, markNotified, markFavorited, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
   lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles, knownOwners, notifiedElsewhere, upsertUser, winnersToRefresh,
   getLot, getCoinRows, upsertKufarLot, saveEstimate,

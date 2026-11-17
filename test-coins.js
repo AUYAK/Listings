@@ -191,6 +191,9 @@ check('все разделы ay.by: карточки только серебро
   assert.strictEqual(half.foreign.mint, 'A');
   assert.strictEqual(half.denomination, '½ марки');
   assert.strictEqual(parseCoin({ title: 'Германия 1914 2 марки A', sectionPath: null }).foreign.value, 2);
+  // обратная косая черта (ay.by 5038444213): «1 \ 2 марки» — тоже половина
+  assert.strictEqual(parseCoin({ title: 'Германия 1 \\ 2 марки 1907 А ( отличное состояние )', sectionPath: null }).foreign.value, 0.5);
+  assert.strictEqual(parseCoin({ title: '1\\2 копейки 1899', sectionPath: null }).denomKop, 0.5);
   const { notifyBlocker } = require('./coins/parse');
   assert.strictEqual(notifyBlocker(parseCoin({ title: 'Коробка для монеты 20 рублей 2000', sectionPath: null }), 'buy_now'), 'не монета (сертификат, футляр)');
 });
@@ -1022,6 +1025,40 @@ check('злотые — Польша и без раздела: серебро с
   const p = parseCoin({ title: '5 злотых 1934 серебро', sectionPath: 'Монеты' });
   assert.strictEqual(p.world.country, 'Польша');
   assert.deepStrictEqual(fineContent(p), { metal: 'silver', grams: 8.25 });
+});
+check('Олимпиада-80: 5 и 10 рублей — серебро, «Сеятель» — золото', () => {
+  const { fineContent } = require('./coins/metal');
+  // ay.by 5041865834: считался золотом на 2 876 р.
+  const oly = parseCoin({ title: '10 рублей 1978 прыжки с шестом', sectionPath: null });
+  assert.strictEqual(oly.metal, 'silver');
+  assert.strictEqual(fineContent(oly).grams, 30);
+  assert.strictEqual(parseCoin({ title: '5 рублей 1977 Олимпиада Москва', sectionPath: null }).metal, 'silver');
+  assert.strictEqual(parseCoin({ title: '10 рублей 1978 Сеятель', sectionPath: null }).metal, 'gold');
+  assert.strictEqual(parseCoin({ title: 'Червонец 10 рублей 1977', sectionPath: null }).metal, 'gold');
+  assert.strictEqual(parseCoin({ title: '10 рублей 1976', sectionPath: null }).metal, 'gold');
+  assert.strictEqual(parseCoin({ title: '100 рублей 1978 Олимпиада', sectionPath: null }).metal, 'gold');
+});
+check('Великобритания до 1946: вес из таблицы с пробой, без модели; с 1947 — не серебро', () => {
+  const { fineContent } = require('./coins/metal');
+  const { needsLookup } = require('./coins/content');
+  // ay.by 5042027770: 7,07 г пришли «по модели — проверьте вес», без пробы
+  const hc = parseCoin({ title: 'С рубля без мц! 1/2 кроны 1944 Великобритания - Георг 6 - UNC - серебро! Блестящая!', sectionPath: null });
+  assert.deepStrictEqual(fineContent(hc), { metal: 'silver', grams: 7.07, basis: '14,14 г × проба 500 (билон)' });
+  assert.strictEqual(needsLookup(hc), false);
+  const fl = parseCoin({ title: 'Флорин 1914 Англия Георг V', sectionPath: null });
+  assert.strictEqual(fl.metal, 'silver');
+  assert.deepStrictEqual(fineContent(fl), { metal: 'silver', grams: 10.46, basis: '11,31 г × проба 925' });
+  assert.strictEqual(fineContent(parseCoin({ title: 'Великобритания 1 шиллинг 1943', sectionPath: null })).grams, 2.83);
+  assert.strictEqual(fineContent(parseCoin({ title: 'Half crown 1937 Великобритания', sectionPath: null })).grams, 7.07);
+  assert.notStrictEqual(parseCoin({ title: '1/2 кроны 1950 Великобритания', sectionPath: null }).metal, 'silver');
+});
+check('СССР 20 копеек: 1930 — серебро, 1931 — никель, если серебро не указано', () => {
+  const { fineContent } = require('./coins/metal');
+  const c1930 = parseCoin({ title: '20 копеек 1930 года, СССР', sectionPath: null });
+  assert.strictEqual(c1930.metal, 'silver');
+  assert.strictEqual(fineContent(c1930).grams, 1.8);
+  assert.strictEqual(parseCoin({ title: '20 копеек 1931 СССР', sectionPath: null }).metal, 'base');
+  assert.strictEqual(parseCoin({ title: '15 копеек 1931 серебро', sectionPath: null }).metal, 'silver');
 });
 check('годы до/нашей эры и диапазон лет — не граммы', () => {
   // ay.by 2026-11-16: «Коммод 177-192 г.н.э Денарий серебро» считался лотом серебра на вес 192 г
