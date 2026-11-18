@@ -39,8 +39,17 @@ async function resolveRecipients(monitor) {
 }
 
 // Карточка с фото: альбом → одно фото → текст. Возвращает message_id или null.
+const CAPTION_LIMIT = 1000; // подпись к фото в Telegram — до 1024 знаков видимого текста (без тегов)
 async function sendCard(chatId, caption, photos = []) {
   let sentMsgId = null;
+  // длинная карточка (с похожими продажами) в подпись не влезает: фото отдельно, текст — следующим сообщением;
+  // возвращается id текста — на него отвечают числом, чтобы заказать ставку
+  if (photos.length && caption.replace(/<[^>]+>/g, '').length > CAPTION_LIMIT) {
+    if (photos.length >= 2) await telegramRequest('sendMediaGroup', { chat_id: chatId, media: photos.slice(0, 10).map((url) => ({ type: 'photo', media: url })) });
+    else await telegramRequest('sendPhoto', { chat_id: chatId, photo: photos[0] });
+    const res = await telegramRequest('sendMessage', { chat_id: chatId, text: caption, parse_mode: 'HTML', disable_web_page_preview: true });
+    return res.ok ? res.result?.message_id || null : null;
+  }
   if (photos.length >= 2) {
     const media = photos.slice(0, 10).map((url, i) => ({ type: 'photo', media: url, ...(i === 0 ? { caption, parse_mode: 'HTML' } : {}) }));
     const res = await telegramRequest('sendMediaGroup', { chat_id: chatId, media });

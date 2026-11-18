@@ -198,6 +198,7 @@ function buildCaption(monitor, lot, parsed, closing = false, est = null, quiet =
     slabLine,
     coin ? `🔎 ${coin}` : null,
     parsed.flags.length ? `⚠️ ${parsed.flags.join(', ')}` : null,
+    lot.reserve === 'not_met' ? '⚠️ Минимальная цена продавца не пройдена (её не видно): если она выше вашего максимума, лот не продадут' : null,
     ...cmarket.formatEstimateLines(est),
     quietLine,
     sellerLine,
@@ -229,20 +230,19 @@ async function notifyLot(monitor, listingId, lot, parsed, closing = false, est =
 
 // Решение по лоту, страницу которого только что прочитали: уведомить (выгодно или тихий лот), подождать
 // (аукцион ещё далеко от конца) или закрыть (не подходит / не выгодно — больше не рассматриваем).
-// «Минимальная цена не пройдена» при выгодной ставке — ждём: когда ставки пройдут минимум, лот может остаться выгодным.
+// «Минимальная цена не пройдена» при выгодной ставке — карточка всё равно уходит, с предупреждением: снайп со своим
+// максимумом ничего не стоит (минимум выше — лот просто не продадут), а молчание прятало лоты вроде ay.by 5042028851.
 async function considerLot(monitor, listingId, lot, parsed, { closing = false } = {}) {
   const timing = notifyTiming(monitor, parsed, lot);
   if (timing === 'never') { await cstore.markNotified(listingId).catch(() => {}); return { action: 'skip' }; }
   if (timing === 'closing') return { action: 'wait' };
   const est = await assessLot(listingId, parsed, lot.price, lot.saleType, { title: lot.title, description: lot.description });
   const quiet = cmarket.quietLot(est, lot);
-  const reserveBlocks = lot.reserve === 'not_met';
-  if (quiet || (timing === 'now' && est.isBargain && !reserveBlocks)) {
+  if (quiet || (timing === 'now' && est.isBargain)) {
     const sent = await notifyLot(monitor, listingId, lot, parsed, closing, est, quiet);
     return { action: quiet ? 'quiet' : 'bargain', sent, est, quiet };
   }
   if (timing === 'quiet') { await cstore.markQuietChecked(listingId).catch(() => {}); return { action: 'wait', est }; }
-  if (est.isBargain && reserveBlocks) return { action: 'wait', est, reserveBlocks }; // перепроверим в следующем цикле
   // аукцион с «купить сейчас» решается сразу, но под конец ещё может стать тихим лотом — не закрываем до окна
   // (в окне тихих лотов — один раз, дальше до последних AUCTION_NOTIFY_HOURS ждёт)
   const hoursLeft = lot.endsAt ? (new Date(lot.endsAt).getTime() - Date.now()) / 3600e3 : 0;
@@ -251,7 +251,7 @@ async function considerLot(monitor, listingId, lot, parsed, { closing = false } 
     return { action: 'wait', est };
   }
   await cstore.markNotified(listingId).catch(() => {});
-  return { action: 'rejected', est, reserveBlocks };
+  return { action: 'rejected', est };
 }
 
 function logDecision(monitor, id, lot, parsed, r) {
@@ -259,8 +259,7 @@ function logDecision(monitor, id, lot, parsed, r) {
   const what = `[${id}] ${lot.title} — ${priceStr(lot.price)}`;
   if (r.action === 'bargain') console.log(`${head} BARGAIN: ${what} · ${parsed.slab ? `слаб ${parsed.slab.grade}` : parsed.grade || '?'} · ${r.est.deviationPct}% к ${r.est.referenceSource} → ${r.sent} чат(ов)`);
   else if (r.action === 'quiet') console.log(`${head} QUIET: ${what} · ${lot.bids} ставок · ориентир ${Math.round(r.quiet.ref)} (${r.quiet.refSource}), максимум ${r.quiet.max} → ${r.sent} чат(ов)`);
-  else if (r.action === 'rejected') console.log(`${head} stored: ${what} · ${parsed.grade || '?'} · ${r.reserveBlocks ? 'минимальная цена не пройдена' : r.est.deviationPct == null ? 'нет ориентира' : r.est.deviationPct + '%'}`);
-  else if (r.action === 'wait' && r.reserveBlocks) console.log(`${head} wait: ${what} · выгодно, но минимальная цена не пройдена — перепроверим`);
+  else if (r.action === 'rejected') console.log(`${head} stored: ${what} · ${parsed.grade || '?'} · ${r.est.deviationPct == null ? 'нет ориентира' : r.est.deviationPct + '%'}`);
   else if (r.action === 'wait' && lot.endsAt) console.log(`${head} auction, notify ≤${AUCTION_NOTIFY_HOURS}h before end${r.est ? ' (не тихий)' : ''}: ${what} (${timeLeftStr(lot.endsAt)})`);
 }
 

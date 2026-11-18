@@ -285,7 +285,8 @@ check('ориентир — самый низкий из источников, �
 });
 check('строки оценки в карточке', () => {
   const p = parseCoin({ title: '1 рубль 1898 АГ', sectionPath: 'Серебро', conditionText: 'III (Коллекционное, VF)' });
-  const lines = cm.formatEstimateLines(cm.assess({ parsed: p, price: 100, rows, catalog: { source: 'numista', prices: { VF: 150 } } }));
+  const notSimilar = (l) => !l.startsWith('🧾') && !l.startsWith(' • '); // похожие продажи проверяет свой тест
+  const lines = cm.formatEstimateLines(cm.assess({ parsed: p, price: 100, rows, catalog: { source: 'numista', prices: { VF: 150 } } })).filter(notSimilar);
   assert.deepStrictEqual(lines, ['📚 Numista (VF): 150 р.', '📊 Наша база (1 рубль 1898 АГ, VF): 120 р. по 3 продажам; просят 425 р. (2 лот.) — не ориентир', '🟡 На 17% (20 р.) ниже нашей базы']);
   assert.deepStrictEqual(cm.formatEstimateLines(cm.assess({ parsed: p, price: 100, rows: [] })), ['📊 Наша база: похожих лотов в этом состоянии ещё не было', '⚪ Ориентира пока нет: ни каталога, ни трёх продаж на ay.by']);
   // несколько источников — каждый своей строкой, вердикт по самому низкому (Numista 140), редкость из справочника типа
@@ -1064,6 +1065,54 @@ check('«Завершен неудачно»: ставки были, миним�
   assert.strictEqual(lot.reserve, 'not_met');
   assert.strictEqual(decideOutcome({ bids: 3 }, lot), 'unsold');
   assert.strictEqual(decideOutcome({ bids: 3 }, { ...lot, statusText: '3 марки 1908 Завершён10 ноября', reserve: 'not_met' }), 'unsold');
+});
+check('похожие продажи: уровень сходства, ближайшие по состоянию и цене, ориентир', () => {
+  const cm = require('./coins/market');
+  const sold = (id, title, price, cc, extra = {}) => {
+    const parsed = parseCoin({ title, sectionPath: null, conditionText: cc });
+    return { id, external_id: String(id), source: 'ayby', title, outcome: 'sold', final_price: price, final_bids: 5, ended_at: new Date('2026-11-10'), grade: parsed.grade, parsed, url: `https://ay.by/lot/x-${id}.html`, ...extra };
+  };
+  const VF = 'III (Коллекционное, VF)', UNC = 'I (Новое, Unc)';
+  const rows = [
+    sold(1, '3 марки 1912 Пруссия', 125, VF), sold(2, '3 марки 1909 Пруссия', 70, VF), sold(3, '3 марки 1910 Пруссия', 90, VF),
+    sold(4, '3 марки 1911 Пруссия', 100, VF), sold(5, '3 марки 1908 Пруссия', 110, VF), sold(6, '3 марки 1913 Пруссия', 600, UNC),
+    sold(7, '3 марки 1929 Германия Веймар', 220, VF), // другой период — не та серия
+    sold(8, '3 марки 1912 Пруссия слаб ННР MS63', 400, UNC), // слаб с сырой монетой не сравнивается
+    sold(9, 'Канада 1 доллар 1965', 120, VF, { fine_g: 18.66 }),
+  ];
+  const lot = parseCoin({ title: '3 марки 1912 Пруссия Вильгельм', sectionPath: null, conditionText: VF });
+  // та же монета есть — показывается она
+  const same = cm.similarSales(rows, lot, { excludeId: 99 });
+  assert.strictEqual(same.tier, 0);
+  assert.deepStrictEqual(same.items.map((i) => i.price), [125]);
+  // без неё — серия: 3 марки Империи; сначала VF, ближайшие к медиане 95, UNC за 600 — последним
+  const series = cm.similarSales(rows.filter((r) => r.id !== 1), lot);
+  assert.strictEqual(series.tier, 1);
+  assert.strictEqual(series.n, 5);
+  assert.strictEqual(series.ref, 95);
+  assert.deepStrictEqual(series.items.map((i) => i.price), [100, 90, 110, 70, 600]);
+  // трёх продаж в том же состоянии ещё нет — ориентиром не становится; с третьей — становится
+  const few = cm.assess({ parsed: lot, price: 50, rows: rows.filter((r) => ![1, 4, 5].includes(r.id)) });
+  assert.strictEqual(few.reference, null);
+  assert.strictEqual(cm.SIMILAR_MIN, 3);
+  const more = cm.assess({ parsed: lot, price: 50, rows: [...rows.filter((r) => r.id !== 1), sold(10, '3 марки 1914 Пруссия', 95, VF)] });
+  assert.strictEqual(more.referenceSource, 'similar');
+  assert.strictEqual(more.reference, 95);
+  assert.strictEqual(more.isBargain, true);
+  const text = cm.formatEstimateLines(more).join(' | ');
+  assert.ok(text.includes('🧾 Похожие продажи ay.by — того же номинала и серии: 6, медиана в этом состоянии 95 р.'), text);
+  assert.ok(text.includes('<a href="https://ay.by/lot/x-10.html">95 р.</a> · 10.11 · VF · 5 ст. · 3 марки 1914 Пруссия'), text);
+  assert.ok(text.includes('ниже похожих продаж — выгодно'), text);
+  assert.ok(!text.includes('ещё не было'));
+  // минимальная цена продавца не пройдена — карточка с предупреждением
+  const { buildCaption } = require('./coins');
+  const cap = buildCaption({ name: 'Монеты (серебро)', emoji: '🪙' }, { title: '3 марки 1912 Пруссия', price: 50, saleType: 'auction', bids: 3, reserve: 'not_met', url: 'https://ay.by/lot/x-11.html', photos: [] }, lot, true, more);
+  assert.ok(cap.includes('⚠️ Минимальная цена продавца не пройдена'), cap);
+  assert.ok(cap.includes('ниже похожих продаж — выгодно'), cap);
+  // ни типа, ни серии — серебро того же веса
+  const world = cm.similarSales(rows, parseCoin({ title: 'Австралия 1 флорин 1950 серебро', sectionPath: null, conditionText: VF }), { fine: 18 });
+  assert.strictEqual(world.tier, 2);
+  assert.deepStrictEqual(world.items.map((i) => i.price), [120]);
 });
 check('металл лота для базы: чистый вес, проба, вес монеты, источник', () => {
   const { contentRecord } = require('./coins/metal');

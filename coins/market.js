@@ -225,6 +225,12 @@ function assess({ parsed, price, rows = [], excludeId = null, catalog = null, ca
   const slabbedSrc = !parsed.slab && ['UNC', 'AU'].includes(parsed.grade) ? list.find((c) => c.prices && (c.prices.MS64 != null || c.prices['MS64+'] != null)) : null;
   const slabbedKey = slabbedSrc && (slabbedSrc.prices.MS64 != null ? 'MS64' : 'MS64+');
   const slabbed = slabbedSrc ? { source: slabbedSrc.source, grade: slabbedKey, price: slabbedSrc.prices[slabbedKey], samples: slabbedSrc.samples ? slabbedSrc.samples[slabbedKey] : null, windowYears: slabbedSrc.windowYears || null, period: slabbedSrc.period || null } : null;
+  // Похожие продажи: список для карточки; если другого ориентира нет, а продаж той же монеты или серии в том же
+  // состоянии не меньше SIMILAR_MIN — их медиана и есть ориентир (уровень «тот же вес» ориентиром не становится)
+  const similar = similarSales(rows, parsed, { excludeId, fine: metal && metal.grams > 0 && !metal.bulk ? metal.grams : null });
+  if (reference == null && similar && similar.tier <= 1 && similar.sameGradeN >= SIMILAR_MIN) {
+    reference = similar.ref; referenceSource = 'similar';
+  }
   const hasPrice = price != null && price >= MIN_PRICE;
   const deviationPct = reference && hasPrice ? Math.round(((price - reference) / reference) * 100) : null;
   const gainByn = reference && hasPrice ? Math.round(reference - price) : null;
@@ -246,6 +252,7 @@ function assess({ parsed, price, rows = [], excludeId = null, catalog = null, ca
     reference, referenceSource, referenceRecent, deviationPct, gainByn,
     metal: metalValue != null ? { ...metal, gain: metalGain, below: belowMetal } : null,
     suspect,
+    similar,
     isBargain: byReference || belowMetal,
     bargainPct, bargainByn, minByn,
   };
@@ -265,6 +272,82 @@ function quietLot(est, lot, { now = Date.now(), hours = QUIET_HOURS, maxBids = Q
   const max = Math.floor(ref * (1 - pct / 100));
   if ((lot.price || 0) > max) return null;
   return { ref, max, refSource: fromMetal ? 'metal' : est.referenceSource, hoursLeft };
+}
+
+// ---- Похожие продажи ay.by: что показать в карточке рядом с лотом ----
+// Уровень сходства: 0 — тот же тип (номинал и год, как в медиане базы); 1 — тот же номинал той же серии (правитель,
+// период Германии: Империя / Веймар / Рейх, страна ± 20 лет); 2 — тот же металл и чистый вес ± 15% (цена серебра
+// в монетах такого размера). Слабы сравниваются только со слабами. Берётся лучший уровень, где что-то есть.
+// Внутри уровня — сначала ближайшие по состоянию, затем ближайшие по цене к их медиане (продажа за 600 р. в лучшем
+// состоянии рядом с лотом на 170 р. ничего не говорит), затем свежие.
+const SIMILAR_MIN = 3;      // столько продаж того же состояния нужно, чтобы медиана похожих стала ориентиром (решение о цене — за человеком)
+const SIMILAR_SHOWN = 5;
+const dePeriod = (y) => (y <= 1918 ? 1 : y <= 1933 ? 2 : 3);
+const SKIP_FLAGS = ['копия', 'несколько монет', 'не монета'];
+
+function similarSales(rows, parsed, { excludeId = null, fine = null, limit = SIMILAR_SHOWN } = {}) {
+  if (!parsed || (parsed.flags || []).some((f) => SKIP_FLAGS.includes(f))) return null;
+  const own = groupKeys(parsed);
+  const ownKeys = new Set(own.filter((k) => k.level !== 'ruler').map((k) => k.key));
+  const rulerKey = (own.find((k) => k.level === 'ruler') || {}).key || null;
+  const slab = Boolean(parsed.slab);
+  const ownIdx = GRADE_ORDER.indexOf(parsed.grade);
+  const seen = new Set();
+  const found = [];
+  for (const r of rows) {
+    // лот могут вести два монитора (раздел и продавец) — одна продажа показывается один раз
+    const dup = r.external_id != null ? `${r.source}|${r.external_id}` : null;
+    if (r.id === excludeId || !r.parsed || r.outcome !== 'sold' || r.source === 'kufar' || (dup && seen.has(dup))) continue;
+    const price = parseFloat(r.final_price);
+    if (!(price >= MIN_PRICE)) continue;
+    const p = rowParsed(r);
+    if (!p || Boolean(p.slab) !== slab || p.metal !== parsed.metal) continue;
+    if ((p.flags || []).some((f) => SKIP_FLAGS.includes(f))) continue;
+    const keys = groupKeys(p);
+    const rowFine = parseFloat(r.fine_g);
+    let tier = null;
+    // марки одного года и номинала у разных земель — разные монеты («3 марки 1910» Бадена и Саксен-Веймара): серия
+    const otherState = parsed.foreign && p.foreign && parsed.foreign.state && p.foreign.state && parsed.foreign.state !== p.foreign.state;
+    if (keys.some((k) => k.level !== 'ruler' && ownKeys.has(k.key))) tier = otherState ? 1 : 0;
+    else if (rulerKey && keys.some((k) => k.key === rulerKey)) tier = 1;
+    else if (parsed.foreign && p.foreign && parsed.foreign.key === p.foreign.key && parsed.year && p.year && dePeriod(parsed.year) === dePeriod(p.year)) tier = 1;
+    else if (parsed.world && p.world && parsed.world.country && p.world.country === parsed.world.country && p.world.unit === parsed.world.unit
+      && p.world.value === parsed.world.value && parsed.year && p.year && Math.abs(p.year - parsed.year) <= 20) tier = 1;
+    // по весу — только иностранные между собой: рубли Империи и марки Германии того же веса стоят дороже серебра
+    // (канадский доллар на 18,66 г рядом с рублём Николая II за 176 р. ничего не говорит)
+    else if (fine > 0 && rowFine > 0 && Math.abs(rowFine - fine) / fine <= 0.15
+      && parsed.denomKop == null && !parsed.foreign && p.denomKop == null && !p.foreign) tier = 2;
+    if (tier == null) continue;
+    if (dup) seen.add(dup);
+    const idx = GRADE_ORDER.indexOf(r.grade);
+    const gdist = slab ? (bucketOf(p) === bucketOf(parsed) ? 0 : 1) : (idx < 0 || ownIdx < 0 ? 1.5 : Math.abs(idx - ownIdx));
+    found.push({
+      tier, gdist, price, at: r.ended_at ? new Date(r.ended_at).getTime() : 0, bids: r.final_bids || 0, title: r.title || '', url: r.url || null,
+      grade: p.slab ? `слаб ${[p.slab.company, p.slab.grade].filter(Boolean).join(' ') || '?'}` : r.grade || '?',
+    });
+  }
+  if (!found.length) return null;
+  const tier = Math.min(...found.map((f) => f.tier));
+  const pool = found.filter((f) => f.tier === tier);
+  const g0 = Math.min(...pool.map((f) => f.gdist));
+  const nearest = pool.filter((f) => f.gdist === g0);
+  const ref = median(nearest.map((f) => f.price));
+  const off = (f) => Math.abs(Math.log(f.price / ref));
+  pool.sort((a, b) => a.gdist - b.gdist || off(a) - off(b) || b.at - a.at);
+  return { tier, n: pool.length, ref, sameGrade: g0 === 0, sameGradeN: g0 === 0 ? nearest.length : 0, items: pool.slice(0, limit) };
+}
+
+const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const SIMILAR_WHAT = ['той же монеты', 'того же номинала и серии', 'иностранных монет того же веса металла'];
+function similarLines(s) {
+  if (!s || !s.items.length) return [];
+  const head = `🧾 Похожие продажи ay.by — ${SIMILAR_WHAT[s.tier]}: ${s.n}${s.sameGradeN >= MIN_SAMPLES ? `, медиана в этом состоянии ${fmt(s.ref)}` : ''}`;
+  return [head, ...s.items.map((it) => {
+    const day = it.at ? new Date(it.at).toLocaleDateString('ru-BY', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Minsk' }) : '';
+    const price = `${String(Math.round(it.price * 100) / 100).replace('.', ',')} р.`;
+    const name = escHtml(it.title.replace(/\s+/g, ' ').trim().slice(0, 34));
+    return ` • ${it.url ? `<a href="${it.url}">${price}</a>` : price}${day ? ` · ${day}` : ''} · ${escHtml(it.grade)}${it.bids ? ` · ${it.bids} ст.` : ''}${name ? ` · ${name}` : ''}`;
+  })];
 }
 
 const fmt = (n) => `${num(n)} р.`;
@@ -298,7 +381,8 @@ function formatEstimateLines(est) {
     lines.push(`📊 Наша база (${m.label}, ${m.grade}): ${main}${ask}`);
   } else if (est.slabDetails) {
     lines.push('📊 Слаб с пометкой details (чистка, повреждения) — с обычными не сравнивается');
-  } else lines.push(`📊 Наша база: похожих лотов ${est.slab && est.slab.bucket ? `в слабе ${est.slab.bucket}` : 'в этом состоянии'} ещё не было`);
+  } else if (!est.similar) lines.push(`📊 Наша база: похожих лотов ${est.slab && est.slab.bucket ? `в слабе ${est.slab.bucket}` : 'в этом состоянии'} ещё не было`);
+  lines.push(...similarLines(est.similar));
   if (est.rarity) lines.push(`💎 Редкость: ${est.rarity.name} ${est.rarity.emoji}${est.rarity.reason ? ` · ${est.rarity.reason}` : ''}`);
   if (est.metal) {
     const m = est.metal;
@@ -317,7 +401,7 @@ function formatEstimateLines(est) {
   } else if (est.slabCheap) {
     lines.push(`⚪ Слаб дешёвой монеты: ориентир ${fmt(est.reference)} меньше ${fmt(SLAB_MIN_BYN)} — это в основном цена слабирования`);
   } else if (est.deviationPct != null) {
-    const base = est.referenceSource === 'market' ? 'нашей базы' : srcName(est.referenceSource).split(',')[0];
+    const base = est.referenceSource === 'market' ? 'нашей базы' : est.referenceSource === 'similar' ? 'похожих продаж' : srcName(est.referenceSource).split(',')[0];
     if (est.isBargain) lines.push(`🟢 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base} — выгодно`);
     else if (est.deviationPct < 0) lines.push(`🟡 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base}`);
     else lines.push(`🔴 На ${est.deviationPct}% выше ${base}`);
@@ -329,7 +413,7 @@ function formatEstimateLines(est) {
 }
 
 module.exports = {
-  assess, isBargain, rarityTier, catalogGrade, marketEstimate, catalogPrice, usablePrice, formatEstimateLines, median, quietLot, periodLabel,
+  assess, isBargain, rarityTier, catalogGrade, marketEstimate, similarSales, similarLines, SIMILAR_MIN, catalogPrice, usablePrice, formatEstimateLines, median, quietLot, periodLabel,
   BARGAIN_PCT, BARGAIN_BYN, BARGAIN_MIN_BYN, MIN_SAMPLES, TIERS, SUSPECT_MIN_REF, SUSPECT_SHARE, SLAB_MIN_BYN,
   QUIET_HOURS, QUIET_MAX_BIDS, QUIET_MIN_REF,
 };

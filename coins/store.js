@@ -380,7 +380,8 @@ async function getCoinRows(monitorKey = null) {
   const res = await pool.query(
     `SELECT l.id, l.external_id, l.monitor_key, l.title, l.first_seen, l.last_seen, l.status,
             a.source, a.sale_type, a.grade, a.condition_code, a.current_price, a.start_price, a.bids, a.bargain,
-            a.ends_at, a.ended_at, a.outcome, a.final_price, a.final_bids, a.parsed, a.category_path
+            a.ends_at, a.ended_at, a.outcome, a.final_price, a.final_bids, a.parsed, a.category_path,
+            l.url, (to_jsonb(a)->>'fine_g')::numeric AS fine_g -- fine_g — миграция 018; без неё просто NULL
      FROM listings.listings l JOIN listings.coin_lots a ON a.listing_id = l.id
      WHERE ($1::text IS NULL OR l.monitor_key = $1)`,
     [monitorKey]
