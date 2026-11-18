@@ -416,7 +416,9 @@ async function sendBids(chatId) {
     const st = { won: '🏆 выиграна', lost: '❌ проиграна', failed: '⚠️ не поставлена', cancelled: '🚫 отменена' };
     for (const r of done) {
       const result = r.final_price != null ? ` · ушёл за ${bid.fmt(r.final_price)}${r.winner ? ` (${escHtml(r.winner)})` : ''}` : '';
-      lines.push(`${st[r.status] || r.status}: <a href="${r.url}">${escHtml(r.title)}</a>\n   до ${bid.fmt(r.max_byn)}${result} · ${r.ends_at ? fmtDate(r.ends_at) : ''}`, '');
+      // «не поставлена» из-за того, что цена ушла выше максимума ещё до снайпа, — это «перебита», а не сбой
+      const label = r.status === 'failed' && /минимальная ставка уже/.test(r.note || '') ? '🔴 перебита до снайпа' : st[r.status] || r.status;
+      lines.push(`${label}: <a href="${r.url}">${escHtml(r.title)}</a>\n   до ${bid.fmt(r.max_byn)}${result} · ${r.ends_at ? fmtDate(r.ends_at) : ''}`, '');
     }
   }
   await send(lines);

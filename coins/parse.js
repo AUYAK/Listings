@@ -32,7 +32,8 @@ function stripStartBid(t) {
 function denominationFrom(title) {
   const t = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е'));
   // дробные: «1/2 копейки», «1/4 копейки», «½ копейки» — иначе «2 копейки» ловится из «1/2»
-  const frac = t.match(/(?:(1)\s*[\/\\]\s*([24])|½|¼)\s*коп/u);
+  // «1/2 серебром 1840» — полкопейки серебром (медь 1839–1848), слово «копейки» продавцы опускают
+  const frac = t.match(/(?:(1)\s*[\/\\]\s*([24])|½|¼)\s*(?:коп|серебром)/u);
   if (frac) return frac[2] ? 1 / parseInt(frac[2], 10) : (frac[0].startsWith('½') ? 0.5 : 0.25);
   // «7 рублей 50 копеек» (золото 1897) → 750
   const rk = t.match(/(?<![\d\/])(\d+)\s*руб\p{L}*\s+(\d{1,2})\s*коп/u);
@@ -364,6 +365,11 @@ const GERMAN_METAL = [
 ];
 
 function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign = null, world = null) {
+  // «¼, ½, 1, 2, 3 копейки серебром» 1839–1848 (дворы ЕМ, СМ, СПМ) — медь: «серебром» — счёт на серебряный рубль,
+  // а не металл (ay.by 5032544116 «1/2 серебром 1840 СПМ» пришёл как серебро на 9 г). Раньше поля «Металл» и слова
+  // «серебро»: продавцы выбирают металл по надписи на монете
+  if (/серебром/.test((title || '').toLowerCase()) && (denomKop == null || denomKop <= 3)
+    && (year ? year >= 1839 && year <= 1848 : denomKop != null)) return 'copper';
   // поле «Металл» лота ay.by — самый надёжный источник
   const sm = (specMetal || '').toLowerCase();
   if (/серебр/.test(sm)) return 'silver';
@@ -462,18 +468,20 @@ const ACCESSORY = /^\s*(?:сертификат|футляр|коробк|кор�
 const ACCESSORY_SECTION = /буклет|сертификат/iu;
 
 // «без забоин», «Отсутствуют грубые дефекты, забоины или следы износа», «не чищена» — продавец заверяет, что дефекта нет
-// (ay.by 5041988554: «⚠️ повреждения» по такому описанию). «без / нет / не» — в той же части фразы до запятой
-// («без коробки, царапина» — дефект), «отсутствуют» — во всём предложении (перечисление через запятую)
+// (ay.by 5041988554: «⚠️ повреждения» по такому описанию). «без / нет / не» — вплотную перед словом дефекта, между
+// ними не больше двух слов без запятых и цифр («без грубых забоин», «без забоин и следов»; «без коробки, царапина»
+// и «без мц с отверстием» — дефект: «без МЦ» вырезается заранее). «Отсутствуют …» — до конца предложения, пока
+// не встретилось «есть / но / имеются» («отсутствует сертификат, есть следы обращения» — дефект).
 const NEGATABLE = new Set(['отверстие', 'чистка', 'повреждения']);
-const NEGATION_NEAR = /(?<!\p{L})(?:без|нет|не|ни)(?!\p{L})/iu;
-const NEGATION_LIST = /(?<!\p{L})отсутству\p{L}*/iu;
-function hasDefect(t, re) {
+const NEGATION_NEAR = /(?<!\p{L})(?:без|нет|не|ни)\s+(?:[\p{L}-]+\s+){0,2}$/iu;
+const NEGATION_LIST = /(?<!\p{L})отсутству\p{L}*(?![^]*(?<!\p{L})(?:есть|но|имеются|имеется)(?!\p{L}))/iu;
+function hasDefect(text, re) {
+  const t = text.replace(new RegExp(NO_RESERVE.source, 'giu'), ' ');
   const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
   for (const m of t.matchAll(g)) {
     const before = t.slice(0, m.index);
     const sentence = before.slice(before.search(/[^.!?\n]*$/));
-    const clause = sentence.slice(sentence.search(/[^,;:]*$/));
-    if (!NEGATION_NEAR.test(clause) && !NEGATION_LIST.test(sentence)) return true;
+    if (!NEGATION_NEAR.test(sentence) && !NEGATION_LIST.test(sentence)) return true;
   }
   return false;
 }

@@ -1070,6 +1070,18 @@ check('Канада: доллары и центы по таблице', () => {
   assert.strictEqual(fc('Канада 50 центов (1/2 доллар) 1964 год, AU').grams, 9.33);
   assert.strictEqual(parseCoin({ title: 'Канада 1 доллар 1958 год. Королева Великобритании', sectionPath: null }).world.country, 'Канада');
 });
+check('«копейки серебром» 1839–1848 — медь, а не серебро', () => {
+  // ay.by 5032544116: «1/2 серебром 1840 СПМ» за 5 р. пришёл как серебро на 39 р. (вес придумала модель)
+  const half = parseCoin({ title: '1/2 серебром 1840 СПМ', sectionPath: null });
+  assert.strictEqual(half.metal, 'copper');
+  assert.strictEqual(half.denomKop, 0.5);
+  assert.strictEqual(half.isPrecious, false);
+  assert.strictEqual(parseCoin({ title: '2 копейки серебром 1842 ЕМ', sectionPath: null }).metal, 'copper');
+  assert.strictEqual(parseCoin({ title: '3 копейки серебром 1840', sectionPath: null, specs: { 'Металл': 'Серебро' } }).metal, 'copper');
+  // настоящее серебро тех же лет не задето
+  assert.strictEqual(parseCoin({ title: '20 копеек 1840 СПБ НГ серебро', sectionPath: null }).metal, 'silver');
+  assert.strictEqual(parseCoin({ title: 'Рубль 1842 СПБ АЧ', sectionPath: null }).metal, 'silver');
+});
 check('история продаж: какие сделки из отзывов открывать', () => {
   const { historyCandidate } = require('./coins');
   assert.strictEqual(historyCandidate('С рубля без мц! 50 эскудо 1968 Португалия - Кабрал - серебро!'), true);
@@ -1086,6 +1098,11 @@ check('расхождение лота с таблицей стандартов:
   assert.strictEqual(fineContent(p).grams, 18.66);
   const est = cm.assess({ parsed: p, price: 100, metal: { ...fineContent(p), pricePerG: 4.37, value: 81.5 } });
   assert.ok(cm.formatEstimateLines(est).some((l) => l.startsWith('⚠️ Расхождение: по лоту 31,1 г') && l.includes('по стандарту монеты 18,66 г')));
+  // под «1 доллар США 1986+» бывает и унция, и памятный доллар 24,06 г: строка нестрогая, главнее текст лота
+  const us = parseCoin({ title: 'США 1 доллар 1987 серебро Конституция', sectionPath: null, description: 'Вес 26,73 г. Проба 900' });
+  assert.strictEqual(us.contentMismatch, undefined);
+  assert.strictEqual(fineContent(us).grams, 24.06);
+  assert.deepStrictEqual(fineContent(parseCoin({ title: 'США 1 доллар 1990 серебро Шагающая Свобода', sectionPath: null })), { metal: 'silver', grams: 31.1 });
   // совпадает с таблицей — отметки нет
   assert.strictEqual(parseCoin({ title: 'Канада 1 доллар 1965', sectionPath: null, description: 'Чистого серебра: 18,66 г' }).contentMismatch, undefined);
 });
@@ -1099,6 +1116,12 @@ check('«без забоин», «отсутствуют… следы изно�
   assert.deepStrictEqual(flagsFrom('1 рубль 1924 царапины', ''), ['повреждения']);
   assert.deepStrictEqual(flagsFrom('1 рубль 1924', 'Без коробки. Забоина на гурте.'), ['повреждения']);
   assert.deepStrictEqual(flagsFrom('1 рубль 1924', 'Без коробки, царапина на аверсе'), ['повреждения']);
+  // «без мц» в заголовке — не отрицание дефекта
+  assert.deepStrictEqual(flagsFrom('1 рубль 1898 без мц с отверстием', ''), ['отверстие']);
+  assert.deepStrictEqual(flagsFrom('Полтинник 1924 без мц чищен', ''), ['чистка']);
+  assert.deepStrictEqual(flagsFrom('С рубля без мц 1 рубль 1924 царапины', ''), ['повреждения']);
+  assert.deepStrictEqual(flagsFrom('1 рубль 1924', 'Отсутствует сертификат, есть следы обращения'), ['повреждения']);
+  assert.deepStrictEqual(flagsFrom('1 рубль 1924', 'Без грубых забоин'), []);
   assert.deepStrictEqual(flagsFrom('20 копеек 1925 чищеная', ''), ['чистка']);
 });
 check('СССР 20 копеек: 1930 — серебро, 1931 — никель, если серебро не указано', () => {

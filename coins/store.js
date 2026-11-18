@@ -303,9 +303,21 @@ async function historyPending() {
   return res.rows[0].n;
 }
 
+// Очередь: непрочитанные и те, что один раз упали с ошибкой (повтор через 6 часов; вторая ошибка — 'failed')
 async function historyQueue(limit) {
-  const res = await pool.query('SELECT external_id, url, title, deal_date FROM listings.coin_history_queue WHERE done_at IS NULL ORDER BY added_at, external_id LIMIT $1', [limit]);
+  const res = await pool.query(
+    `SELECT external_id, url, title, deal_date, result FROM listings.coin_history_queue
+     WHERE done_at IS NULL OR (result = 'error' AND done_at < NOW() - interval '6 hours')
+     ORDER BY added_at, external_id LIMIT $1`,
+    [limit]
+  );
   return res.rows;
+}
+
+// Лот из истории: дата появления = дата продажи, стартовая цена неизвестна
+async function markHistoryLot(listingId, soldAt) {
+  await pool.query('UPDATE listings.coin_lots SET start_price = NULL WHERE listing_id = $1', [listingId]);
+  if (soldAt) await pool.query('UPDATE listings.listings SET first_seen = LEAST(first_seen, $2) WHERE id = $1', [listingId, soldAt]);
 }
 
 async function historyDone(externalId, result) {
@@ -633,6 +645,6 @@ module.exports = {
   lotByMessage, lotByExternalId, saveManualLot, reviveLot, endedLots, relistLot, lotRounds, setBid, cancelBid, getBid, updateBid, bidsDue, openBids, recentBids,
   upsertCard, saveLotDetails, recordOutcome, touchEndsAt, lotsToAssess, markNotified, markFavorited, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
   lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles, knownOwners, notifiedElsewhere, upsertUser, winnersToRefresh,
-  getLot, getCoinRows, upsertKufarLot, saveEstimate, historyUsers, markHistoryRead, queueHistory, historyPending, historyQueue, historyDone,
+  getLot, getCoinRows, upsertKufarLot, saveEstimate, historyUsers, markHistoryRead, queueHistory, historyPending, historyQueue, historyDone, markHistoryLot,
   getCatalog, getCatalogs, catalogKeys, upsertCoinType, upsertSales, rebuildCatalogFromSales, renormalizeSales, CATALOG_FACTOR,
 };

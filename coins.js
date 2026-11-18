@@ -808,16 +808,25 @@ function historyCandidate(title) {
 
 async function readFeedback(page, userId) {
   let found = 0, queued = 0;
-  for (const tab of ['buyer_all', 'seller_all']) {
-    for (let n = 1; n <= HISTORY_PAGES; n++) {
-      const r = await ayby.scanFeedback(page, userId, tab, n);
-      ok();
-      if (!r.deals.length) break; // сделок нет, они старше 60 дней или продавец скрывает завершённые лоты
-      found += r.deals.length;
-      queued += await cstore.queueHistory(r.deals.filter((d) => !owners.has(d.id) && historyCandidate(d.title)));
-      if (r.entries < 10) break;
-      await next(page);
+  try {
+    for (const tab of ['buyer_all', 'seller_all']) {
+      // страница без ссылок — ещё не конец: у продавца, скрывающего завершённые лоты, ссылок нет, а дальше идут
+      // сделки с другими. Конец — три такие страницы подряд (старше 60 дней ссылок нет ни у кого) или неполная страница
+      for (let n = 1, empty = 0; n <= HISTORY_PAGES && empty < 3; n++) {
+        const r = await ayby.scanFeedback(page, userId, tab, n);
+        ok();
+        empty = r.deals.length ? 0 : empty + 1;
+        found += r.deals.length;
+        queued += await cstore.queueHistory(r.deals.filter((d) => !owners.has(d.id) && historyCandidate(d.title)));
+        if (r.entries < 10) break;
+        await next(page);
+      }
     }
+  } catch (err) {
+    // ay.by ограничивает — пользователь остаётся непрочитанным; другая ошибка — отмечаем, иначе он будет первым
+    // в каждом цикле и до остальных очередь не дойдёт (уже найденные сделки стоят в очереди)
+    if (ayby.isBlocked(err) || /^HTTP \d/.test(err.message)) throw err;
+    console.warn(`  [История] отзывы ${userId}: ${err.message}`);
   }
   await cstore.markHistoryRead(userId);
   return { found, queued };
@@ -843,6 +852,9 @@ async function saveHistoryLot(page, row) {
       outcome: 'sold', finalPrice: lot.finalPrice ?? lot.price, finalBids: lot.bids, endedAt: lot.endedAt || row.deal_date || null,
       statusText: `история (отзывы); ${lot.statusText || ''}`.slice(0, 300), winner: lot.winner, winnerId: lot.winnerId,
     });
+    // лот увидели после торгов: дата появления — дата продажи (иначе отчёты по first_seen считают его новым),
+    // стартовая цена неизвестна (карточка несла уже итоговую)
+    await cstore.markHistoryLot(listingId, lot.endedAt || row.deal_date || null);
     if (worthPhotos(monitor, parsed, Math.max(lot.bids || 0, 1))) {
       const files = await photos.saveLotPhotos(row.external_id, lot.photos || [], null);
       if (files.length) await cstore.savePhotoFiles(listingId, files);
@@ -876,8 +888,8 @@ async function collectHistory(page) {
     let result;
     try { result = await saveHistoryLot(page, row); } catch (err) {
       console.warn(`  [История] ${row.url}: ${err.message}`);
-      failed(err); // ay.by ограничивает — выходим, лот остаётся в очереди
-      result = 'error';
+      failed(err); // ay.by ограничивает (подряд) — выходим, лот остаётся в очереди
+      result = row.result === 'error' ? 'failed' : 'error'; // 'error' — ещё одна попытка через 6 часов (historyQueue)
     }
     await cstore.historyDone(row.external_id, result);
     counts[result] = (counts[result] || 0) + 1;

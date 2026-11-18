@@ -334,6 +334,9 @@ function feedbackUrl(userId, tab, pageNo = 1) {
 async function scanFeedback(page, userId, tab, pageNo = 1) {
   const resp = await page.goto(feedbackUrl(userId, tab, pageNo), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
   if (resp && resp.status() === 404) return { entries: 0, deals: [] };
+  // 403/429/5xx — нас ограничивают или сайт лежит: пустая страница означала бы «сделок нет», и пользователь
+  // был бы отмечен прочитанным
+  if (resp && resp.status() >= 400) throw new Error(`HTTP ${resp.status()}: отзывы не открылись`);
   await assertNotVerification(page);
   await page.waitForSelector('ul.comments, h1', { timeout: 10000 }).catch(() => {});
   const raw = await page.evaluate(() => {

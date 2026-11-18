@@ -81,7 +81,7 @@ const UK = UK_SILVER.flatMap(([unit, value, gross]) => [[1816, 1919, 0.925], [19
 // 1920–1967 — серебро 800 (до 1919 — 925)
 const CANADA = [
   ['Канада', 'доллар', 1, 1935, 1967, 'silver', 18.66, purityBasis(23.33, 0.8)], ['Канада', 'доллар', 1, 1971, 1991, 'silver', 11.66, purityBasis(23.33, 0.5)],
-  ['Канада', 'доллар', 1, 1992, 2011, 'silver', 23.29, purityBasis(25.175, 0.925)],
+  ['Канада', 'доллар', 1, 1992, 2011, 'silver', 23.29, purityBasis(25.175, 0.925), 'loose'], // с 2003 бывают и 9999
   ['Канада', 'цент', 50, 1920, 1967, 'silver', 9.33, purityBasis(11.66, 0.8)], ['Канада', 'доллар', 0.5, 1920, 1967, 'silver', 9.33, purityBasis(11.66, 0.8)],
   ['Канада', 'цент', 25, 1920, 1967, 'silver', 4.67, purityBasis(5.83, 0.8)],
   ['Канада', 'цент', 10, 1920, 1967, 'silver', 1.87, purityBasis(2.33, 0.8)],
@@ -89,7 +89,7 @@ const CANADA = [
 
 const WORLD = [
   ...UK, ...CANADA,
-  ['США', 'доллар', 1, 1878, 1935, 'silver', 24.06], ['США', 'доллар', 1, 1986, 2100, 'silver', 31.1], // Морган/Пис; Silver Eagle
+  ['США', 'доллар', 1, 1878, 1935, 'silver', 24.06], ['США', 'доллар', 1, 1986, 2100, 'silver', 31.1, null, 'loose'], // Морган/Пис; Silver Eagle (памятные доллары — 24,06 г)
   ['США', 'цент', 50, 1892, 1964, 'silver', 11.25], ['США', 'цент', 50, 1965, 1970, 'silver', 4.6],
   ['США', 'цент', 25, 1892, 1964, 'silver', 5.62], ['США', 'цент', 10, 1892, 1964, 'silver', 2.25],
   ['США', 'доллар', 20, 1850, 1933, 'gold', 30.09], ['США', 'доллар', 10, 1838, 1933, 'gold', 15.04],
@@ -125,7 +125,8 @@ function tableContent(parsed) {
   if (w) {
     const row = WORLD.find(([c, u, v, from, to, m]) => u === w.unit && v === w.value && m === parsed.metal && (!c || c === w.country)
       && (!parsed.year || (parsed.year >= from && parsed.year <= to)) && (parsed.year || c === null));
-    if (row) return { metal: parsed.metal, grams: row[6], ...(row[7] ? { basis: row[7] } : {}) };
+    // 'loose' — под этим номиналом и годом бывают монеты другого веса: текст лота главнее такой строки
+    if (row) return { metal: parsed.metal, grams: row[6], ...(row[7] ? { basis: row[7] } : {}), ...(row[8] === 'loose' ? { loose: true } : {}) };
   }
   return null;
 }
@@ -134,10 +135,12 @@ function tableContent(parsed) {
 // показываем в карточке и храним в базе (parsed.contentMismatch) — такие лоты потом сверяются вручную.
 // { table, stated, statedBasis } или null
 const MISMATCH_PCT = 10;
-function contentMismatch(parsed) {
+function contentMismatch(parsed, table = undefined) {
   const stated = parsed && parsed.content && parsed.content.fineGrams > 0 ? parsed.content : null;
-  const table = stated && !(parsed.weight && parsed.weight.fineGrams > 0) ? tableContent(parsed) : null;
-  if (!table || Math.abs(stated.fineGrams - table.grams) / table.grams * 100 <= MISMATCH_PCT) return null;
+  if (!stated || (parsed.weight && parsed.weight.fineGrams > 0)) return null;
+  if (table === undefined) table = tableContent(parsed);
+  // нестрогая строка таблицы — не стандарт, сверять не с чем
+  if (!table || table.loose || Math.abs(stated.fineGrams - table.grams) / table.grams * 100 <= MISMATCH_PCT) return null;
   return { table: table.grams, stated: stated.fineGrams, statedBasis: stated.basis || null };
 }
 
@@ -151,12 +154,14 @@ function fineContent(parsed) {
     return { metal: 'silver', grams: w.fineGrams, bulk: { grams: w.grams, purity: w.purity, purityAssumed: w.purityAssumed } };
   }
   if (!parsed || (parsed.metal !== 'silver' && parsed.metal !== 'gold')) return null;
-  const table = tableContent(parsed);
-  if (table) {
-    const mismatch = contentMismatch(parsed);
+  const stated = parsed.content && parsed.content.fineGrams > 0 ? parsed.content : null;
+  const found = tableContent(parsed);
+  if (found && !(found.loose && stated)) {
+    const { loose, ...table } = found;
+    const mismatch = contentMismatch(parsed, found);
     return mismatch ? { ...table, mismatch } : table;
   }
-  if (parsed.content && parsed.content.fineGrams > 0) return { metal: parsed.metal, grams: parsed.content.fineGrams, basis: parsed.content.basis };
+  if (stated) return { metal: parsed.metal, grams: parsed.content.fineGrams, basis: parsed.content.basis };
   if (parsed.denomKop != null) {
     // без года («Белая синица. 10 рублей. Серебро.») — наименьший вес номинала за все годы
     const table2 = parsed.metal === 'gold' ? MODERN_GOLD : MODERN_SILVER;
