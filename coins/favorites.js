@@ -1,11 +1,11 @@
-// Избранное ay.by: выгодный лот добавляется в избранное аккаунта.
+// Аккаунт ay.by для снайп-ставок (sniper.js): сессия, вход, страница в контексте аккаунта. В избранное лоты
+// больше не добавляются (2026-11-18): ставки заказываются ответом на карточку.
 // Вход в аккаунт — один из двух способов:
 //   1) node ayby-login.js на сервере: открывается окно браузера, пользователь входит сам, cookies сохраняются
 //      в AYBY_SESSION_FILE (пароль нигде не хранится; при протухании сессии — повторить);
 //   2) AYBY_LOGIN / AYBY_PASSWORD в .env: вход выполняется автоматически, когда сессия протухла.
 // Аккаунт живёт в отдельном контексте браузера, чтобы сканирование сотен страниц шло анонимно и не
 // связывалось с учётной записью.
-// Проверка результата — не по кнопке, а по странице «Избранное»: там должен появиться id лота.
 // Проверка сессии на сервере: node ayby-login.js --check
 
 const fs = require('fs');
@@ -18,7 +18,6 @@ const LOGIN_URL = 'https://ay.by/personal/login.phtml';
 const FAVORITES_URL = 'https://ay.by/personal/favorite_lists.phtml';
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 const NAV_TIMEOUT = parseInt(process.env.COINS_NAV_TIMEOUT_MS || '30000', 10);
-const FAV_BUTTON = /^\s*(?:добавить\s+)?в\s+избранное\s*$/i;
 
 const hasCredentials = () => Boolean(LOGIN && PASSWORD);
 const hasSession = () => fs.existsSync(SESSION_FILE);
@@ -135,94 +134,6 @@ async function ensureLoggedIn(page) {
   loggedIn = true;
 }
 
-// Лот в избранном? Ищем id лота на странице избранного (ссылка на лот, element_id в ссылке удаления), на страницах
-// списков и на следующих страницах (избранное бота растёт: когда лотов больше страницы, новый мог уйти на другую).
-// Ссылки — и абсолютные, и относительные; не больше FAV_MAX_PAGES страниц.
-const FAV_MAX_PAGES = 15;
-const idInHtml = (html, lotId) => html.includes(`-${lotId}.html`) || new RegExp(`(?:element_id|lot_id|lot|id)[=/:-]${lotId}(?!\\d)`).test(html);
-async function hasFavorite(page, lotId) {
-  const queue = [FAVORITES_URL];
-  const seen = new Set(queue);
-  for (let n = 0; n < queue.length && n < FAV_MAX_PAGES; n++) {
-    await page.goto(queue[n], { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-    await assertNotVerification(page);
-    await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {}); // список может догружаться скриптом
-    const html = await page.content();
-    if (idInHtml(html, lotId)) return true;
-    for (const m of html.matchAll(/(?:https?:\/\/ay\.by)?\/personal\/favorite_lists\.phtml\?[^"'\s<>]+/g)) {
-      const url = new URL(m[0].replace(/&amp;/g, '&'), 'https://ay.by').href;
-      if (/action=/.test(url) || seen.has(url)) continue;
-      seen.add(url);
-      queue.push(url);
-    }
-  }
-  return false;
-}
-
-// Добавление через запрос, который шлёт сама кнопка «В избранное» (так делает кнопка на странице лота):
-// GET favorite_lists.phtml?action=element_insert&ajax=1&element_id=<id>&type=auction — с cookies аккаунта
-async function insertFavorite(page, lotId, lotUrl) {
-  const url = `${FAVORITES_URL}?action=element_insert&ajax=1&element_id=${lotId}&type=auction`;
-  const resp = await page.request.get(url, { headers: { Referer: lotUrl || 'https://ay.by/', 'X-Requested-With': 'XMLHttpRequest' }, timeout: NAV_TIMEOUT });
-  const body = (await resp.text().catch(() => '')).replace(/\s+/g, ' ').trim();
-  return { status: resp.status(), url: resp.url(), body: body.slice(0, 300) };
-}
-
-// Кнопка «В избранное» на странице лота: нажать и вернуть её текст после нажатия
-async function clickFavorite(page, lotUrl) {
-  await page.goto(lotUrl, { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
-  await assertNotVerification(page);
-  await page.waitForSelector('.b-lot-title__title, .b-lot-control', { timeout: 10000 }).catch(() => {});
-  const btn = page.getByText(FAV_BUTTON).first();
-  if (!(await btn.count())) {
-    const already = await page.getByText(/в избранном|удалить из избранного|убрать из избранного/i).first().count();
-    return { clicked: false, already: already > 0 };
-  }
-  const before = (await btn.innerText().catch(() => '')).trim();
-  // ответ ay.by на нажатие бывает окном alert («список переполнен» и т. п.): Playwright молча закрывает такие окна,
-  // поэтому текст запоминаем — он попадёт в причину неудачи
-  const dialogs = [];
-  const onDialog = (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); };
-  page.on('dialog', onDialog);
-  await btn.click({ timeout: 10000 });
-  await pause(2000);
-  page.off('dialog', onDialog);
-  const after = (await btn.innerText().catch(() => '')).trim();
-  return { clicked: true, before, after, dialogs, url: page.url() };
-}
-
-// Добавить лот в избранное. Возвращает { ok, note }; никогда не бросает — уведомление важнее избранного.
-async function add(lotUrl, lotId) {
-  if (!enabled()) return { ok: false, note: 'выключено (нет AYBY_LOGIN/AYBY_PASSWORD)' };
-  if (!context) return { ok: false, note: 'контекст аккаунта не открыт' };
-  const page = await context.newPage();
-  try {
-    await ensureLoggedIn(page);
-    if (await hasFavorite(page, lotId)) return { ok: true, note: 'уже в избранном' };
-    // кнопка на странице лота — основной путь (прямой запрос element_insert защита ay.by отвечает 403)
-    const r = await clickFavorite(page, lotUrl);
-    if (/login\.phtml/.test(r.url || '')) { loggedIn = false; return { ok: false, note: 'сессия слетела, перенаправило на вход' }; }
-    if (r.clicked && await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено' }; }
-    if (!r.clicked && r.already) return { ok: true, note: 'уже в избранном (по кнопке)' };
-    if (!r.clicked) return { ok: false, note: 'кнопка «В избранное» не найдена' };
-    const ins = await insertFavorite(page, lotId, lotUrl);
-    if (ins.status < 400 && await hasFavorite(page, lotId)) { await saveSession(); return { ok: true, note: 'добавлено (запросом)' }; }
-    // что ответил сайт: окно после кнопки, текст кнопки, ответ запроса — по ним видно причину (лимит, сессия, защита)
-    const said = [
-      r.dialogs && r.dialogs.length ? `окно: «${r.dialogs.join(' / ').slice(0, 120)}»` : null,
-      r.after && r.after !== r.before ? `кнопка: «${r.before}» → «${r.after}»` : `кнопка не изменилась («${r.before}»)`,
-      `запрос: HTTP ${ins.status}${ins.body ? `, ответ «${ins.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120)}»` : ''}`,
-    ].filter(Boolean).join('; ');
-    log(`${lotId}: не добавлено — ${said}`);
-    return { ok: false, note: `нажали кнопку, но в избранном лота нет (${said})` };
-  } catch (err) {
-    if (/вход не удался|verification/i.test(err.message)) loggedIn = false;
-    return { ok: false, note: err.message };
-  } finally {
-    await page.close().catch(() => {});
-  }
-}
-
 // Страница в контексте аккаунта без проверки входа (отладка)
 async function rawPage() {
   if (!context) throw new Error('контекст аккаунта не открыт (favorites.open(browser))');
@@ -237,6 +148,6 @@ async function newPage() {
 }
 
 module.exports = {
-  enabled, hasCredentials, hasSession, open, close, add, login, isLoggedIn, accountNick, savedNick, hasFavorite, insertFavorite, clickFavorite, ensureLoggedIn, newPage, rawPage, saveSession,
-  assertNotVerification, FAV_BUTTON, SESSION_FILE, LOGIN_URL, FAVORITES_URL, LOGIN, USER_AGENT, RELOGIN_HINT,
+  enabled, hasCredentials, hasSession, open, close, login, isLoggedIn, accountNick, savedNick, ensureLoggedIn, newPage, rawPage, saveSession,
+  assertNotVerification, SESSION_FILE, LOGIN_URL, FAVORITES_URL, LOGIN, USER_AGENT, RELOGIN_HINT,
 };

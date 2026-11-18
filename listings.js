@@ -3,7 +3,7 @@ const { chromium } = require('playwright');
 const store = require('./store');
 // Этот процесс ведёт только мониторы Kufar; площадки с другим source (ay.by → coins.js) живут отдельно
 const MONITORS = require('./config').MONITORS.filter((m) => !m.source || m.source === 'kufar');
-const { parseCoin, notifyBlocker, collectionHint, preciousLines } = require('./coins/parse');
+const { parseCoin, notifyBlocker, preciousLines } = require('./coins/parse');
 const cstore = require('./coins/store');
 const cmarket = require('./coins/market');
 const { assessCoin } = require('./coins/assess');
@@ -15,8 +15,6 @@ const photos = require('./coins/photos');
 //     (ниже каталога или нашей оценки на BARGAIN_PCT). Состояния у Kufar нет: если его нет и в заголовке, ориентир
 //     считается по F — нижняя оценка, «50 копеек 1925 за 30 р.» всё равно выгодно, а за 100 р. — нет.
 //     Слабы по фиксированной цене не шлём: такие цены завышены, а подделки слабов обычны;
-//  2) коллекции, альбомы, россыпь, наследство (parse.collectionHint) — любая цена до KUFAR_LOTS_MAX_BYN:
-//     оценить можно только по фото, а именно так продают монеты те, кто не знает им цену.
 // Возвращает { notify, reason, lines }.
 const ASSUMED_GRADE = 'F';
 const LOTS_MAX_BYN = parseFloat(process.env.KUFAR_LOTS_MAX_BYN || '0'); // 0 — без ограничения
@@ -27,10 +25,6 @@ async function assessCoinListing(listingId, listing) {
   const price = extractPriceFromStr(listing.price, 'р.');
   const priceOk = !(LOTS_MAX_BYN > 0 && price > LOTS_MAX_BYN);
   await cstore.upsertKufarLot(listingId, parsed, price).catch((err) => console.warn(`  [Coins] save failed: ${err.message}`));
-  const lot = collectionHint(listing.title, listing.params);
-  if (lot && !parsed.flags.includes('копия') && priceOk) {
-    return { notify: true, lines: [`🧺 Похоже на коллекцию / россыпь (${lot}) — оценить по фото: ориентира у бота нет`] };
-  }
   if (!parsed.isPrecious) {
     // заголовок ни о чём («Монеты разных стран»), а в описании — серебро или золото с номиналом/годом
     const found = preciousLines(listing.description);

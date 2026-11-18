@@ -23,8 +23,9 @@ function rulerFor(year) {
 }
 
 // Номинал в копейках: «50 копеек», «полтина», «1 рубль», «1,5 рубля»; «25 пенни» — не копейки (Финляндия, worldFrom)
-// Стартовая ставка аукциона в заголовке: «С 1 РУБЛЯ!», «от 1 руб.», «старт 1 р.», «с рубля» — не номинал
-const START_BID_RE = /(?<!\p{L})(?:с|от|старт\p{L}*|(?:начальная\s+|стартовая\s+)?цена)\s*:?\s*(?:\d+(?:[.,]\d+)?\s*)?(?:бел\.?\s*)?(?:руб\p{L}*|р\.|byn)(?!\p{L})/giu;
+// Стартовая ставка аукциона в заголовке: «С 1 РУБЛЯ!», «от 1 руб.», «старт 1 р.», «с рубля», «С 20 копеек» — не номинал
+// («Данциг 10 пфеннигов, 1923. С 20 копеек. Распродажа коллекции» читался как 20 копеек 1923 — серебро СССР)
+const START_BID_RE = /(?<!\p{L})(?:с|от|старт\p{L}*|(?:начальная\s+|стартовая\s+)?цена)\s*:?\s*(?:(?:\d+(?:[.,]\d+)?\s*)?(?:бел\.?\s*)?(?:руб\p{L}*|р\.|byn)|\d+\s*коп\p{L}*\.?)(?!\p{L})/giu;
 function stripStartBid(t) {
   return t.replace(START_BID_RE, ' ');
 }
@@ -555,17 +556,6 @@ function parseCoin({ title, sectionPath, conditionText, description, specs = {} 
   return parsed;
 }
 
-// Kufar: коллекция, альбом, россыпь, наследство — разбирать по фото (ориентира нет, бывают дорогие монеты за бесценок).
-// «Из моей коллекции», «для коллекции», пустые альбомы и бумага — нет. Возвращает короткую причину или null.
-const COLLECTION_HINTS = [
-  ['коллекция', /(?<!(?:из|для|в)\s+(?:моей\s+|личной\s+|вашей\s+)?)коллекци(?:я|ю|и)(?!\p{L})/iu],
-  ['альбом / кляссер', /кляссер|альбом\p{L}*\s+(?:с\s+)?монет|монет\p{L}*\s+в\s+альбом/iu],
-  ['россыпь', /россып\p{L}*|на\s+вес(?!\p{L})|(?<!\p{L})кг(?!\p{L})|килограм\p{L}*|мешок|банк[аиу]\s+(?:с\s+)?монет/iu],
-  ['наследство', /наследств\p{L}*|от\s+(?:деда|дедушки|бабушки|бабули|отца|папы)(?!\p{L})/iu],
-  ['много монет', /(?<![\d.,])(?:[2-9]\d|[1-9]\d{2,})\s*(?:шт\p{L}*|монет\p{L}*)(?!\p{L})|много\s+монет|монеты\s+(?:разные|старые|ссср|царские|империи)(?:\s*$|[,.!])/iu],
-];
-const NOT_COLLECTION = /для\s+(?:монет|банкнот|бон)|пуст\p{L}*|без\s+монет|банкнот|(?<!\p{L})бон[аыу]?(?!\p{L})|купюр|значк|марк[аи]\s+почт|почтов|открыт/iu;
-
 // СССР 1961–1991, недрагметалл: номинал (коп.) → год → что искать. Деньги здесь не в типе, а в букве двора, цвете
 // металла (перепутка — монета на кружке другого номинала), гурте и редких годах. Цены — дилерская таблица raritetus
 // (без даты): 20 коп. 1991 без буквы 13,8–27,7 тыс. ₽, 5 и 10 коп. 1990 М до 26–30 тыс., белые 2/3 коп. 12–75 тыс.
@@ -584,13 +574,6 @@ const USSR_VARIETIES = {
 function ussrVariety(parsed) {
   if (!parsed || parsed.isPrecious || !(parsed.year >= 1961 && parsed.year <= 1991)) return null;
   return (USSR_VARIETIES[parsed.denomKop] || {})[parsed.year] || null;
-}
-
-function collectionHint(title, text = '') {
-  const t = `${title || ''} ${text || ''}`;
-  if (NOT_COLLECTION.test(title || '')) return null;
-  const hit = COLLECTION_HINTS.find(([, re]) => re.test(t));
-  return hit ? hit[0] : null;
 }
 
 // Kufar: серебро и золото в описании объявления, у которого заголовок ничего не говорит («Монеты разных стран»):
@@ -653,6 +636,6 @@ function groupKeys(p) {
 
 module.exports = {
   parseCoin, groupKeys, notifyBlocker, denominationFrom, denominationLabel, yearFrom, mintFrom, metalFrom,
-  gradeFromAyby, gradeFromTitle, flagsFrom, rulerFor, slabFrom, gradeTokenFrom, weightFrom, contentFrom, worldFrom, purityFrom, collectionHint, preciousLines, ussrVariety,
+  gradeFromAyby, gradeFromTitle, flagsFrom, rulerFor, slabFrom, gradeTokenFrom, weightFrom, contentFrom, worldFrom, purityFrom, preciousLines, ussrVariety,
   GRADE_ORDER, AYBY_GRADES, SLAB_RAW_EQUIV, COPY_SECTION,
 };

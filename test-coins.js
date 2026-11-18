@@ -576,17 +576,13 @@ check('монитор: металл и страна по пути раздела
   assert.strictEqual(matchesMonitor({ metals: ['silver'] }, parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null })), true);
 });
 
-check('избранное ay.by: строка в карточке, выключено без логина', () => {
+check('аккаунт ay.by: включён при логине или сессии; в избранное лоты не добавляются', () => {
   const { buildCaption } = require('./coins');
   const favorites = require('./coins/favorites');
   assert.strictEqual(favorites.enabled(), favorites.hasCredentials() || favorites.hasSession());
-  assert.ok(favorites.FAV_BUTTON.test(' В избранное ') && favorites.FAV_BUTTON.test('Добавить в избранное') && !favorites.FAV_BUTTON.test('Избранное'));
-  const mon = { name: 'Монеты (золото)', emoji: '🥇' };
+  assert.strictEqual(favorites.add, undefined);
   const lot = { title: '10 рублей 1899 АГ', price: 2500, saleType: 'buy_now', url: 'https://ay.by/lot/x-1.html', photos: [] };
-  const parsed = parseCoin({ title: lot.title, sectionPath: null });
-  assert.ok(buildCaption(mon, lot, parsed, false, null, { ok: true, note: 'добавлено' }).includes('⭐ Добавлено в избранное ay.by'));
-  assert.ok(buildCaption(mon, lot, parsed, false, null, { ok: false, note: 'сессия слетела' }).includes('⭐ В избранное не добавлено: сессия слетела'));
-  assert.ok(!buildCaption(mon, lot, parsed, false, null, null).includes('⭐'));
+  assert.ok(!buildCaption({ name: 'Монеты (золото)', emoji: '🥇' }, lot, parseCoin({ title: lot.title, sectionPath: null })).includes('⭐'));
 });
 
 check('снайп: разбор ответа в Telegram', () => {
@@ -817,7 +813,7 @@ check('монитор: тихое окно, слаб по фикс-цене, л�
   assert.strictEqual(endsAtNight(new Date('2026-11-10T22:00:00Z')), true);  // 01:00 Минск
   assert.strictEqual(endsAtNight(new Date('2026-11-10T12:00:00Z')), false); // 15:00 Минск
   const lot = { title: '1 рубль 1924 MS-64 NGC', price: 1, bids: 0, saleType: 'auction', endsAt: new Date('2026-11-10T22:00:00Z'), url: 'https://ay.by/lot/x-1.html', photos: [], seller: 'Новичок', sellerRating: 3 };
-  const cap = buildCaption({ name: 'Монеты (серебро)', emoji: '🪙' }, lot, { ...slab, noReserve: true }, false, null, null, { ref: 447, max: 312 });
+  const cap = buildCaption({ name: 'Монеты (серебро)', emoji: '🪙' }, lot, { ...slab, noReserve: true }, false, null, { ref: 447, max: 312 });
   assert.ok(cap.includes('🤫 Тихий лот — Монеты (серебро)'), cap);
   assert.ok(cap.includes('🏛 Слаб NGC MS64'), cap);
   assert.ok(cap.includes('🤫 Тихий лот: ставок нет, без МЦ, заканчивается ночью. Разумный максимум ≈ 312 р. (ориентир 447 р. минус 30%)'), cap);
@@ -867,19 +863,6 @@ check('после 1991: ни нашей медианы, ни архивов по
   assert.deepStrictEqual(groupKeys(by), []);
   assert.deepStrictEqual(catalogKeys(by), []);
   assert.ok(groupKeys(parseCoin({ title: '1 рубль 1898 АГ', sectionPath: null })).length > 0);
-});
-check('Kufar: коллекции, альбомы, россыпь; не «из коллекции» и не пустые альбомы', () => {
-  const { collectionHint } = require('./coins/parse');
-  assert.strictEqual(collectionHint('Коллекция монет СССР'), 'коллекция');
-  assert.strictEqual(collectionHint('Кляссер с монетами'), 'альбом / кляссер');
-  assert.strictEqual(collectionHint('Монеты россыпью 2 кг'), 'россыпь');
-  assert.strictEqual(collectionHint('Монеты от деда, разные'), 'наследство');
-  assert.strictEqual(collectionHint('Монеты 150 шт'), 'много монет');
-  assert.strictEqual(collectionHint('Монеты старые'), 'много монет');
-  assert.strictEqual(collectionHint('50 копеек 1925 из моей коллекции'), null);
-  assert.strictEqual(collectionHint('Альбом для монет, новый'), null);
-  assert.strictEqual(collectionHint('Коллекция банкнот'), null);
-  assert.strictEqual(collectionHint('монета 50 копеек 1925'), null);
 });
 check('ay.by: ник продавца из карточки, страницы продавца, сортировка «Новые»', () => {
   const { authorNick, sellerPageUrl } = require('./coins/ayby');
@@ -1069,6 +1052,29 @@ check('Канада: доллары и центы по таблице', () => {
   assert.strictEqual(fc('Канада 1 доллар 1973'), null); // никель, серебро не указано
   assert.strictEqual(fc('Канада 50 центов (1/2 доллар) 1964 год, AU').grams, 9.33);
   assert.strictEqual(parseCoin({ title: 'Канада 1 доллар 1958 год. Королева Великобритании', sectionPath: null }).world.country, 'Канада');
+});
+check('«Завершен неудачно»: ставки были, минимальная цена не пройдена — не продажа', () => {
+  const { interpretLot } = require('./coins/ayby');
+  const raw = { title: '3 марки 1908', timerSeconds: 0, priceText: null, bidsText: '3 ставки', hasBidButton: false, hasBuyNow: false, specs: {}, photos: [], titleAreaText: '3 марки 1908 Завершён10 ноября в 21:00:00',
+    endedAtText: '10 ноября в 21:00:00', soldText: null, unsoldText: 'Завершен неудачно', reserveText: 'Минимальная цена не была преодолена.', statusHint: null };
+  const lot = interpretLot(raw, 200);
+  assert.strictEqual(lot.sold, false);
+  assert.strictEqual(lot.reserve, 'not_met');
+  assert.strictEqual(decideOutcome({ bids: 3 }, lot), 'unsold');
+  assert.strictEqual(decideOutcome({ bids: 3 }, { ...lot, statusText: '3 марки 1908 Завершён10 ноября', reserve: 'not_met' }), 'unsold');
+});
+check('«С 20 копеек» — стартовая ставка, а не номинал', () => {
+  // распродажи Kukarzinio: иностранная мелочь попадала в серебро как «20 копеек 1923»
+  const d = parseCoin({ title: 'Данциг 10 пфеннигов, 1923. С 20 копеек. Распродажа коллекции. Смотрите другие лоты.', sectionPath: null });
+  assert.strictEqual(d.denomKop, null);
+  assert.notStrictEqual(d.metal, 'silver');
+  assert.notStrictEqual(parseCoin({ title: 'Великобритания 1 фартинг, 1927. С 20 копеек. Распродажа коллекции.', sectionPath: null }).metal, 'silver');
+  assert.strictEqual(parseCoin({ title: 'Старт 50 коп! 15 копеек 1925', sectionPath: null }).denomKop, 15);
+  // настоящие 20 копеек остаются
+  const k = parseCoin({ title: '20 копеек 1923. С 20 копеек. Распродажа коллекции.', sectionPath: null });
+  assert.strictEqual(k.denomKop, 20);
+  assert.strictEqual(k.metal, 'silver');
+  assert.strictEqual(parseCoin({ title: 'С рубля! 20 копеек 1915 ВС', sectionPath: null }).denomKop, 20);
 });
 check('«копейки серебром» 1839–1848 — медь, а не серебро', () => {
   // ay.by 5032544116: «1/2 серебром 1840 СПМ» за 5 р. пришёл как серебро на 39 р. (вес придумала модель)

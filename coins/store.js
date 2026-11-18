@@ -136,10 +136,6 @@ async function markNotified(listingId) {
   await pool.query('UPDATE listings.coin_lots SET notified_at = NOW() WHERE listing_id = $1', [listingId]);
 }
 
-async function markFavorited(listingId) {
-  await pool.query('UPDATE listings.coin_lots SET favorited_at = NOW() WHERE listing_id = $1', [listingId]);
-}
-
 // Аукционы, у которых до конца осталось не больше hours часов, уведомление ещё не уходило; плюс те, что попали
 // в окно тихих лотов (≤ quietHours) и ещё не проверялись на «тихий лот» — их проверяем один раз
 async function lotsClosingSoon(monitorKey, hours, quietHours, limit) {
@@ -643,7 +639,7 @@ async function recentBids(chatId, days = 7) {
 
 module.exports = {
   lotByMessage, lotByExternalId, saveManualLot, reviveLot, endedLots, relistLot, lotRounds, setBid, cancelBid, getBid, updateBid, bidsDue, openBids, recentBids,
-  upsertCard, saveLotDetails, recordOutcome, touchEndsAt, lotsToAssess, markNotified, markFavorited, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
+  upsertCard, saveLotDetails, recordOutcome, touchEndsAt, lotsToAssess, markNotified, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
   lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles, knownOwners, notifiedElsewhere, upsertUser, winnersToRefresh,
   getLot, getCoinRows, upsertKufarLot, saveEstimate, historyUsers, markHistoryRead, queueHistory, historyPending, historyQueue, historyDone, markHistoryLot,
   getCatalog, getCatalogs, catalogKeys, upsertCoinType, upsertSales, rebuildCatalogFromSales, renormalizeSales, CATALOG_FACTOR,

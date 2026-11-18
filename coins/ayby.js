@@ -185,7 +185,8 @@ async function fetchLot(page, url) {
     // победитель Wolf71. 1 сделка» / «16 ставок» в блоке цены
     out.endedAtText = (body.match(/Заверш[её]н\s*(\d{1,2}\s+[а-яё]+(?:\s+\d{4})?\s+в\s+\d{1,2}:\d{2}(?::\d{2})?)/i) || [null, null])[1];
     out.soldText = (body.match(/Лот продан за\s*[\d\s.,]+\s*бел\.?\s*руб\.?[^.]{0,80}/) || [null])[0];
-    out.unsoldText = (body.match(/(?:Лот не продан|Торги завершены без ставок|Лот снят с торгов|Лот отменён|Лот отменен)[^.]{0,60}/) || [null])[0];
+    // «Завершен неудачно» + «Минимальная цена не была преодолена» — ставки были, но продавец лот не отдал
+    out.unsoldText = (body.match(/(?:Лот не продан|Торги завершены без ставок|Лот снят с торгов|Лот отменён|Лот отменен|Заверш[её]н неудачно|Минимальная цена не была преодолена)[^.]{0,60}/) || [null])[0];
     return out;
   });
   return interpretLot(raw, code);
@@ -223,7 +224,7 @@ function interpretLot(raw, code = 200) {
   const price = soldPrice ?? parsePrice(raw.priceText);
   // победитель: ссылка в строке «Лот продан…», запасной вариант — текст «победитель ник»
   const winner = raw.winner || (sold ? ((raw.soldText.match(/победитель\s+([^,]+?)\.?$/) || [null, null])[1] || null) : null);
-  const reserve = !raw.reserveText ? null : /не\s+пройдена/.test(raw.reserveText) ? 'not_met' : /пройдена/.test(raw.reserveText) ? 'met' : null;
+  const reserve = !raw.reserveText ? null : /не\s+(?:была\s+)?(?:пройдена|преодолена)/.test(raw.reserveText) ? 'not_met' : /пройдена|преодолена/.test(raw.reserveText) ? 'met' : null;
 
   return {
     gone: false,

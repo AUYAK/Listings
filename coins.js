@@ -165,7 +165,7 @@ function roundsLine(rounds) {
   return `🔁 Перевыставлен${rounds.length > 1 ? ` (${rounds.length}-й раз)` : ''}: ${parts.join('; ')}`;
 }
 
-function buildCaption(monitor, lot, parsed, closing = false, est = null, fav = null, quiet = null) {
+function buildCaption(monitor, lot, parsed, closing = false, est = null, quiet = null) {
   const saleLabel = { auction: 'аукцион', buy_now: 'купить сейчас', auction_buynow: 'аукцион + купить сейчас' }[lot.saleType] || '';
   const priceLine = lot.saleType === 'buy_now'
     ? `💰 ${priceStr(lot.price)}${lot.bargain ? ' · возможен торг' : ''}`
@@ -200,20 +200,10 @@ function buildCaption(monitor, lot, parsed, closing = false, est = null, fav = n
     quietLine,
     sellerLine,
     lot.sellerCity ? `📍 ${lot.sellerCity}` : null,
-    fav ? (fav.ok ? '⭐ Добавлено в избранное ay.by' : `⭐ В избранное не добавлено: ${fav.note}`) : null,
     favorites.enabled() && /auction/.test(lot.saleType || '') ? `✍️ Ответьте числом — максимальная ставка, бот поставит её за ${SNIPE_SECONDS} с до конца` : null,
     `<a href="${lot.url}">Открыть лот</a>`,
   ].filter(Boolean);
   return lines.join('\n');
-}
-
-// Выгодный лот: сначала в избранное аккаунта ay.by (если настроено), потом карточка подписчикам
-async function addToFavorites(listingId, lot) {
-  if (!favorites.enabled()) return null;
-  const fav = await favorites.add(lot.url, lot.externalId);
-  if (fav.ok) await cstore.markFavorited(listingId).catch(() => {});
-  console.log(`  [Favorites] [${lot.externalId}] ${fav.ok ? 'в избранном' : 'не добавлен'}: ${fav.note}`);
-  return fav;
 }
 
 async function notifyLot(monitor, listingId, lot, parsed, closing = false, est = null, quiet = null) {
@@ -223,11 +213,10 @@ async function notifyLot(monitor, listingId, lot, parsed, closing = false, est =
     console.log(`  [${monitor.name}] [${lot.externalId}] уже отправлен другим монитором`);
     return 0;
   }
-  const fav = await addToFavorites(listingId, lot);
   const targets = await tg.resolveRecipients(monitor);
   if (!tg.isConfigured() || !targets.length) return 0;
   lot.rounds = await cstore.lotRounds(listingId).catch(() => []);
-  const caption = buildCaption(monitor, lot, parsed, closing, est, fav, quiet);
+  const caption = buildCaption(monitor, lot, parsed, closing, est, quiet);
   let sent = 0;
   for (const chatId of targets) {
     const msgId = await tg.sendCard(chatId, caption, lot.photos || []);
@@ -538,7 +527,9 @@ async function finalizeGone(row, note) {
 function decideOutcome(row, lot) {
   if (lot.sold) return 'sold';
   const st = (lot.statusText || '').toLowerCase();
-  if (/не продан|без ставок|снят|отменён|отменен/.test(st)) return 'unsold';
+  // «Завершен неудачно», «Минимальная цена не была преодолена»: ставки были, но это не продажа (193 таких лота
+  // до 2026-11-18 записались проданными без цены и считались продажами)
+  if (/не продан|без ставок|снят|отменён|отменен|неудачно|не была преодолена/.test(st) || lot.reserve === 'not_met') return 'unsold';
   if (/продан|куплен/.test(st)) return 'sold';
   if ((lot.bids || row.bids || 0) > 0) return 'sold';
   return 'unsold';
@@ -785,13 +776,11 @@ async function feedTick() {
   try {
     browser = await chromium.launch({ headless: true });
     const page = await (await browser.newContext({ userAgent: USER_AGENT, locale: 'ru-BY' })).newPage();
-    await favorites.open(browser).catch((err) => console.warn(`  [Favorites] контекст аккаунта не открыт: ${err.message}`));
     console.log(`[${ts()}] Coins: лента новых лотов`);
     await feedCheckpoint(page);
   } catch (err) {
     console.error('  [Лента] Error:', err.message);
   } finally {
-    await favorites.close();
     if (browser) await browser.close();
     feedTickRunning = false;
   }
@@ -906,7 +895,6 @@ async function cycle(isFirstRun) {
   try {
     const context = await browser.newContext({ userAgent: USER_AGENT, locale: 'ru-BY' });
     const page = await context.newPage();
-    await favorites.open(browser).catch((err) => console.warn(`  [Favorites] контекст аккаунта не открыт: ${err.message}`));
     owners = await cstore.knownOwners(monitors.map((m) => m.key));
     ended = await cstore.endedLots(monitors.map((m) => m.key)).catch((err) => { console.warn(`  [Перевыставлен] ${err.message}`); return new Map(); });
     for (const monitor of monitors) {
@@ -929,7 +917,6 @@ async function cycle(isFirstRun) {
     try { await refreshWinners(page); } catch (err) { console.error('  [Users] Error:', err.message); }
     try { await collectHistory(page); } catch (err) { console.error('  [История] Error:', err.message); }
   } finally {
-    await favorites.close();
     await browser.close();
   }
   await tidyPhotos();
