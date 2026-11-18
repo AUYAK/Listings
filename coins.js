@@ -4,7 +4,7 @@
 // дочитывание старых лотов порциями → итоги по истёкшим лотам (цена, победитель) → рейтинги победителей.
 // Отдельно раз в несколько минут — лента новых лотов всех разделов (scanFeed): дешёвое «купить сейчас» не ждёт цикла.
 // В конце цикла — история продаж через отзывы покупателей и продавцов (collectHistory).
-// Запуск: node coins.js (pm2: coins-monitor). Нужны миграции 011–017.
+// Запуск: node coins.js (pm2: coins-monitor). Нужны миграции 011–018.
 require('dotenv').config();
 const { chromium } = require('playwright');
 const store = require('./store');
@@ -13,6 +13,8 @@ const ayby = require('./coins/ayby');
 const { parseCoin, notifyBlocker } = require('./coins/parse');
 const cmarket = require('./coins/market');
 const { assessCoin } = require('./coins/assess');
+const { contentRecord } = require('./coins/metal');
+const { resolveContent, needsLookup } = require('./coins/content');
 const photos = require('./coins/photos');
 const favorites = require('./coins/favorites');
 const { SNIPE_SECONDS } = require('./coins/bid');
@@ -45,7 +47,7 @@ const PRECLOSE_STALE_MIN = 15;
 const PRECLOSE_BATCH = 40;
 const SECTIONS_TTL_MS = 24 * 3600e3;
 // История продаж через отзывы (collectHistory): пользователей и страниц лотов за цикл; COINS_HISTORY_LOTS=0 — выключить
-const HISTORY_USERS = parseInt(process.env.COINS_HISTORY_USERS || '2', 10);
+const HISTORY_USERS = parseInt(process.env.COINS_HISTORY_USERS || '6', 10);
 const HISTORY_LOTS = parseInt(process.env.COINS_HISTORY_LOTS || '40', 10);
 const HISTORY_PAGES = 60; // страниц отзывов на вкладку: по 10 сделок, ссылки на лоты кончаются раньше (~60 дней)
 const SELLER_MAX_PAGES = parseInt(process.env.COINS_SELLER_MAX_PAGES || '15', 10); // по 100 лотов
@@ -856,6 +858,39 @@ async function saveHistoryLot(page, row) {
 }
 
 let historyWarned = false;
+// Металл каждого лота в базе: чистый вес, проба, вес монеты и источник (таблица стандартов, текст лота, наша база,
+// Numista, модель). Сначала всё, что считается без сети; затем поиск для проданных лотов без веса — понемногу за цикл
+// (ответы кэшируются по типу монеты, модель — не больше COINS_CONTENT_MODEL_PER_DAY в сутки).
+const CONTENT_BATCH = 2000;
+const CONTENT_LOOKUPS = parseInt(process.env.COINS_CONTENT_LOOKUPS || '15', 10);
+const CONTENT_LOOKUP_MIN_BYN = parseFloat(process.env.COINS_CONTENT_LOOKUP_MIN_BYN || '20');
+let contentWarned = false;
+async function fillContent() {
+  let rows;
+  try { rows = await cstore.lotsWithoutContent(CONTENT_BATCH); } catch (err) {
+    if (!contentWarned) { contentWarned = true; console.warn(`  [Металл] ${err.message} (применить migrations/018_coin_content.sql)`); }
+    return;
+  }
+  let known = 0;
+  for (const row of rows) {
+    const rec = row.parsed ? contentRecord(row.parsed) : null;
+    if (rec) known++;
+    await cstore.saveContent(row.id, rec);
+  }
+  let found = 0;
+  const todo = CONTENT_LOOKUPS ? await cstore.lotsForContentLookup(CONTENT_LOOKUPS, CONTENT_LOOKUP_MIN_BYN) : [];
+  for (const row of todo) {
+    let rec = null;
+    if (needsLookup(row.parsed)) {
+      const content = await resolveContent(row.parsed, row.title, row.description || '').catch(() => null);
+      if (content) rec = contentRecord({ ...row.parsed, content });
+    }
+    if (rec) found++;
+    await cstore.saveContent(row.id, rec, 'unknown');
+  }
+  if (rows.length || todo.length) console.log(`  [Металл] посчитано ${rows.length} (известен вес у ${known}); поиск по ${todo.length} проданным: найдено ${found}`);
+}
+
 async function collectHistory(page) {
   if (!HISTORY_LOTS) return;
   let pending;
@@ -916,6 +951,7 @@ async function cycle(isFirstRun) {
     try { await deepScan(page); } catch (err) { console.error('  [Глубокий] Error:', err.message); }
     try { await refreshWinners(page); } catch (err) { console.error('  [Users] Error:', err.message); }
     try { await collectHistory(page); } catch (err) { console.error('  [История] Error:', err.message); }
+    try { await fillContent(); } catch (err) { console.error('  [Металл] Error:', err.message); }
   } finally {
     await browser.close();
   }

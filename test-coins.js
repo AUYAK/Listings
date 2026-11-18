@@ -662,7 +662,9 @@ check('Германия: марки, буква двора, земля, мета
   assert.strictEqual(parseCoin({ title: 'Германия. 3 рейх марки 1928 D. слаб CPRC MS63', sectionPath: null }).foreign.key, 'M3');
   assert.strictEqual(parseCoin({ title: 'Нотгельд 50 пфеннигов 1921 год Ганновер. Веймарская республика', sectionPath: null }).foreign, null);
   assert.strictEqual(parseCoin({ title: 'Беляев в космосе! СССР 1965 год 1 марка', sectionPath: null }).foreign, null);
-  assert.strictEqual(parseCoin({ title: '1 марка 1914 D MS-67 PCGS', sectionPath: null }).foreign, null); // без Германии в заголовке и разделе
+  // без Германии в заголовке и разделе: серебряный номинал своего года — германская марка (так пишут на Kufar)
+  assert.strictEqual(parseCoin({ title: '1 марка 1914 D MS-67 PCGS', sectionPath: null }).foreign.mint, 'D');
+  assert.strictEqual(parseCoin({ title: 'СССР 1925 год 1 марка', sectionPath: null }).foreign, null);
   assert.strictEqual(parseCoin({ title: '1 марка 1914 D MS-67 PCGS', sectionPath: 'Монеты › Европа › Германия › 1871-1918' }).foreign.mint, 'D');
 });
 check('«без МЦ» из заголовка', () => {
@@ -1062,6 +1064,35 @@ check('«Завершен неудачно»: ставки были, миним�
   assert.strictEqual(lot.reserve, 'not_met');
   assert.strictEqual(decideOutcome({ bids: 3 }, lot), 'unsold');
   assert.strictEqual(decideOutcome({ bids: 3 }, { ...lot, statusText: '3 марки 1908 Завершён10 ноября', reserve: 'not_met' }), 'unsold');
+});
+check('металл лота для базы: чистый вес, проба, вес монеты, источник', () => {
+  const { contentRecord } = require('./coins/metal');
+  const rec = (title, description = '') => contentRecord(parseCoin({ title, sectionPath: null, description }));
+  assert.deepStrictEqual(rec('1/2 кроны 1944 Великобритания серебро'), { metal: 'silver', fineG: 7.07, purity: 0.5, grossG: 14.14, source: 'table', basis: '14,14 г × проба 500 (билон)', mismatch: null });
+  const m = rec('3 марки 1912 Пруссия');
+  assert.deepStrictEqual([m.fineG, m.purity, m.grossG, m.source], [15, 0.9, 16.67, 'table']);
+  const k = rec('20 копеек 1915 ВС');
+  assert.deepStrictEqual([k.fineG, k.purity, k.grossG], [1.8, 0.5, 3.6]);
+  assert.strictEqual(rec('Рубль 1842 СПБ АЧ').purity, null); // проба у рублей до 1885 другая — не выдумываем
+  const lot = rec('2 доллара Ниуэ 2010 серебро', 'Вес 31,1 г, проба 999');
+  assert.deepStrictEqual([lot.source, lot.purity, lot.grossG], ['lot', 0.999, 31.1]);
+  assert.strictEqual(contentRecord({ ...parseCoin({ title: '50 эскудо 1968 Португалия серебро', sectionPath: null }), content: { fineGrams: 11.7, basis: 'по Numista: Portugal, 50 Escudos, 18 г × проба 650' } }).source, 'numista');
+  assert.strictEqual(rec('50 эскудо 1968 Португалия серебро'), null);
+});
+check('Kufar: германские марки без слова «Германия»', () => {
+  const { fineContent } = require('./coins/metal');
+  const k = (title) => parseCoin({ title, sectionPath: null });
+  assert.strictEqual(fineContent(k('3 марки 1909')).grams, 15);
+  assert.strictEqual(fineContent(k('1/2 марки 1913 года. Серебро.')).grams, 2.5);
+  assert.strictEqual(fineContent(k('Монета 5 марок 1907')).grams, 25);
+  assert.strictEqual(k('2 марки 1888 года').metal, 'silver');
+  // другая страна, другой год, раздел другой страны — не Германия
+  assert.strictEqual(k('монета 2 марки 1874 Финляндия, серебро').foreign, null);
+  assert.strictEqual(k('Шведская серебряная монета 2 марки 1905').foreign, null);
+  assert.strictEqual(k('1 марка 1961').foreign, null);
+  assert.strictEqual(k('10 марок 1923 Польша').foreign, null);
+  assert.strictEqual(parseCoin({ title: '1 марка 1890', sectionPath: 'Монеты › Европа Финляндия' }).foreign, null);
+  assert.strictEqual(parseCoin({ title: '3 марки 1911', sectionPath: 'Монеты › Европа Германия 1871-1918' }).foreign.value, 3);
 });
 check('«С 20 копеек» — стартовая ставка, а не номинал', () => {
   // распродажи Kukarzinio: иностранная мелочь попадала в серебро как «20 копеек 1923»

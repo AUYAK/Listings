@@ -8,8 +8,8 @@ const DIR = path.resolve(process.env.COINS_PHOTO_DIR || path.join(__dirname, '..
 const MAX_MB = parseFloat(process.env.COINS_PHOTO_MAX_MB || '1024');
 const PER_LOT = parseInt(process.env.COINS_PHOTO_PER_LOT || '2', 10);
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
-const WIDTH = parseInt(process.env.COINS_PHOTO_WIDTH || '450', 10);   // сжатие, если установлен sharp (npm i sharp)
-const QUALITY = parseInt(process.env.COINS_PHOTO_QUALITY || '75', 10);
+const WIDTH = parseInt(process.env.COINS_PHOTO_WIDTH || '650', 10);   // сжатие, если установлен sharp (npm i sharp)
+const QUALITY = parseInt(process.env.COINS_PHOTO_QUALITY || '82', 10);
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
 
 let sharp = null;

@@ -171,6 +171,48 @@ function fineContent(parsed) {
   return null;
 }
 
+// Проба по стандарту чеканки там, где таблица хранит только чистый вес: Германия и Россия/СССР. null — проба
+// у номинала менялась (рубли и полтины до 1885, мелкое серебро до 1867) или монета не из этих таблиц.
+function standardPurity(parsed) {
+  const y = parsed.year;
+  const f = parsed.foreign;
+  if (f && f.unit === 'марка' && y) {
+    if (parsed.metal === 'gold') return 0.9;
+    if (y <= 1919) return 0.9;
+    if (y <= 1933) return 0.5;
+    return f.value === 2 ? 0.625 : f.value === 5 ? 0.9 : null;
+  }
+  const d = parsed.denomKop;
+  if (d == null || !y) return null;
+  if (parsed.metal === 'gold') return y >= 1886 ? 0.9 : null;
+  if (y >= 1977 && y <= 1980 && (d === 500 || d === 1000)) return 0.9; // Олимпиада-80
+  if (d <= 20) return y >= 1867 && y <= 1931 ? 0.5 : null;
+  if (d === 25 || d === 50 || d === 100) return (y >= 1886 && y <= 1917) || (y >= 1921 && y <= 1927) ? 0.9 : null;
+  return null;
+}
+
+// Запись о металле лота для базы (coin_lots.fine_g, purity, gross_g, content_source, content_basis):
+// source — откуда чистый вес: table (стандарт чеканки), table_min (наименьший из ходовых весов номинала),
+// lot (текст лота: вес, проба, унции), base / numista / model (coins/content.js). null — содержание неизвестно.
+function contentRecord(parsed) {
+  const fc = fineContent(parsed);
+  if (!fc) return null;
+  const basis = fc.bulk ? `вес лота ${fc.bulk.grams} г × проба ${fc.bulk.purity}${fc.bulk.purityAssumed ? ' (не указана)' : ''}` : fc.basis || null;
+  let source = 'table';
+  if (fc.bulk) source = 'lot';
+  else if (/^по нашей базе/.test(basis || '')) source = 'base';
+  else if (/^по Numista/.test(basis || '')) source = 'numista';
+  else if (/^по модели/.test(basis || '')) source = 'model';
+  else if (/наименьший из ходовых/.test(basis || '')) source = 'table_min';
+  else if (parsed.content && parsed.content.fineGrams === fc.grams && parsed.content.basis === fc.basis) source = 'lot';
+  // «14,14 г × проба 500» в пояснении — вес монеты и проба; иначе проба по стандарту, вес — из неё
+  const m = (basis || '').match(/(\d+(?:[.,]\d+)?)\s*г\s*×\s*проба\s*(\d{3,4})(?!\d)/);
+  let purity = fc.bulk ? fc.bulk.purity : m ? parseInt(m[2], 10) / (m[2].length === 4 ? 10000 : 1000) : source === 'table' ? standardPurity(parsed) : null;
+  if (!(purity > 0 && purity <= 1)) purity = null;
+  const gross = fc.bulk ? fc.bulk.grams : m ? parseFloat(m[1].replace(',', '.')) : purity ? Math.round((fc.grams / purity) * 100) / 100 : null;
+  return { metal: fc.metal, fineG: fc.grams, purity, grossG: gross, source, basis, mismatch: fc.mismatch || null };
+}
+
 // { metal, grams, pricePerG, value } — стоимость металла в BYN; null, если содержание или цена неизвестны
 function metalValue(parsed, prices) {
   const fc = fineContent(parsed);
@@ -187,4 +229,4 @@ async function metalValueLive(parsed) {
   return metalValue(parsed, prices);
 }
 
-module.exports = { fineContent, tableContent, contentMismatch, metalValue, metalValueLive, purityBasis, SILVER, GOLD, MODERN_SILVER, MODERN_GOLD, GERMAN, WORLD };
+module.exports = { fineContent, tableContent, contentMismatch, contentRecord, standardPurity, metalValue, metalValueLive, purityBasis, SILVER, GOLD, MODERN_SILVER, MODERN_GOLD, GERMAN, WORLD };

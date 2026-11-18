@@ -316,6 +316,36 @@ async function markHistoryLot(listingId, soldAt) {
   if (soldAt) await pool.query('UPDATE listings.listings SET first_seen = LEAST(first_seen, $2) WHERE id = $1', [listingId, soldAt]);
 }
 
+// ---- Металл лота в базе (fine_g, purity, gross_g, content_source — миграция 018) ----
+
+// Лоты из драгметалла, по которым металл ещё не считали
+async function lotsWithoutContent(limit) {
+  const res = await pool.query(
+    `SELECT a.listing_id AS id, a.parsed FROM listings.coin_lots a
+     WHERE a.content_at IS NULL AND a.parsed->>'metal' IN ('silver', 'gold') ORDER BY a.listing_id DESC LIMIT $1`,
+    [limit]
+  );
+  return res.rows;
+}
+
+// Проданные лоты, чей металл не дали ни таблицы, ни текст лота: кандидаты на поиск (наша база → Numista → модель)
+async function lotsForContentLookup(limit, minPrice) {
+  const res = await pool.query(
+    `SELECT a.listing_id AS id, a.parsed, a.description, l.title FROM listings.coin_lots a JOIN listings.listings l ON l.id = a.listing_id
+     WHERE a.content_source = 'none' AND a.outcome = 'sold' AND a.final_price >= $2 ORDER BY a.ended_at DESC NULLS LAST LIMIT $1`,
+    [limit, minPrice]
+  );
+  return res.rows;
+}
+
+// rec — metal.contentRecord или null; source — что записать, когда rec нет ('none' — не знаем, 'unknown' — искали и не нашли)
+async function saveContent(listingId, rec, source = 'none') {
+  await pool.query(
+    `UPDATE listings.coin_lots SET fine_g = $2, purity = $3, gross_g = $4, content_source = $5, content_basis = $6, content_at = NOW() WHERE listing_id = $1`,
+    [listingId, rec ? rec.fineG : null, rec ? rec.purity : null, rec ? rec.grossG : null, rec ? rec.source : source, rec ? (rec.basis || '').slice(0, 300) || null : null]
+  );
+}
+
 async function historyDone(externalId, result) {
   await pool.query('UPDATE listings.coin_history_queue SET done_at = NOW(), result = $2 WHERE external_id = $1', [String(externalId), result]);
 }
@@ -641,6 +671,6 @@ module.exports = {
   lotByMessage, lotByExternalId, saveManualLot, reviveLot, endedLots, relistLot, lotRounds, setBid, cancelBid, getBid, updateBid, bidsDue, openBids, recentBids,
   upsertCard, saveLotDetails, recordOutcome, touchEndsAt, lotsToAssess, markNotified, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
   lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles, knownOwners, notifiedElsewhere, upsertUser, winnersToRefresh,
-  getLot, getCoinRows, upsertKufarLot, saveEstimate, historyUsers, markHistoryRead, queueHistory, historyPending, historyQueue, historyDone, markHistoryLot,
+  getLot, getCoinRows, upsertKufarLot, saveEstimate, historyUsers, markHistoryRead, queueHistory, historyPending, historyQueue, historyDone, markHistoryLot, lotsWithoutContent, lotsForContentLookup, saveContent,
   getCatalog, getCatalogs, catalogKeys, upsertCoinType, upsertSales, rebuildCatalogFromSales, renormalizeSales, CATALOG_FACTOR,
 };

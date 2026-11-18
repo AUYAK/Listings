@@ -82,19 +82,27 @@ const stateKey = (s) => (s.includes('-') ? s.toLowerCase() : s.toLowerCase().sli
 const GERMAN_HINT = new RegExp(`герман|рейх|веймар|${GERMAN_STATES.map(stateKey).join('|')}`, 'u');
 const NOT_COIN = /нотгельд|банкнот|(?<!\p{L})бон[аыу]?(?!\p{L})|купюр|облигац|почтов/iu;
 
+const OTHER_MARK_COUNTRY = /финл|финск|finland|suomi|markk|penni|польш|polsk|эстон|eesti|гдр|фрг|данциг|латв|литв|швец|швед|норвег|босни|ссср|ussr|российск\p{L}*\s+импер/iu;
+
 // «3 марки 1911 A Пруссия» → { unit: 'марка', value: 3, key: 'M3', mint: 'A', state: 'Пруссия' }.
-// Только 1871–1945 и только если это явно Германия (раздел или земля в заголовке): «1 марка» без этого — почтовая марка.
+// Только 1871–1945. Германия — по разделу, земле или слову в заголовке; без них — только серебряные и золотые номиналы
+// своих лет и только без раздела и без признаков другой страны («1 марка 2005» — почтовая марка или другая страна).
 function foreignFrom(title, sectionPath, year) {
   if (!year || year < 1871 || year > 1945) return null;
   const t = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е'));
   if (NOT_COIN.test(t)) return null; // нотгельды, банкноты — бумага, не монеты
-  if (!GERMAN_HINT.test(t) && !/германи/i.test(sectionPath || '')) return null;
+  const german = GERMAN_HINT.test(t) || /германи/i.test(sectionPath || '');
+  // раздел другой страны или её признак в заголовке — не Германия (марки были у Финляндии, Польши, Эстонии)
+  if (!german && (sectionPath || OTHER_MARK_COUNTRY.test(t))) return null;
   // «1 / 2 марки» с пробелами — половина марки, а не «2 марки» (ay.by 5041902713)
   const m = t.match(/(?<![\d\/\\.,]|[\/\\]\s+)(\d+(?:[.,]\d+)?|½|1\s*[\/\\]\s*2)\s*(рейхс?\s*мар\p{L}*|марк\p{L}*|марок|пфен+и?н?г\p{L}*)/u);
   if (!m) return null;
   const value = m[1] === '½' || /^1\s*[\/\\]\s*2$/.test(m[1]) ? 0.5 : parseFloat(m[1].replace(',', '.'));
   if (!(value > 0 && value <= 1000)) return null;
   const unit = /^пф/.test(m[2]) ? 'пфенниг' : 'марка';
+  // без слова «Германия» и без раздела (Kufar: «3 марки 1909», «1/2 марки 1913 года. Серебро») — только серебряные
+  // и золотые номиналы своих лет из GERMAN_METAL: «N марок» такого года без другой страны — германские
+  if (!german && !(unit === 'марка' && GERMAN_METAL.some(([v, from, to]) => v === value && year >= from && year <= to))) return null;
   // буква двора отдельно после года: «1911 A», «1911A», «1904 А» (кириллица), «1913 г. A», «1926 год. F», «1910 год, " F "»;
   // «1934 года. Буква F» — по слову «буква»
   const up = (title || '').toUpperCase();
