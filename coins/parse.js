@@ -527,7 +527,10 @@ function parseCoin({ title, sectionPath, conditionText, description, specs = {} 
       metal: null, isSilver: false, isGold: false, isPrecious: false, conditionCode: ay.code || null, grade: null, gradeSource: null,
       titleGrade, slab: null, weight: null, noReserve: NO_RESERVE.test(title || ''), flags };
   }
-  const slab = slabFrom(title, description);
+  // числовой грейд в уточнении к состоянию («MS66» под полем «Состояние») — монета в слабе, даже если в заголовке
+  // о слабе ни слова; служба неизвестна
+  const condNote = specs['Состояние: уточнение'] || '';
+  const slab = slabFrom(title, description) || (/(?<!\p{L})(?:MS|PF|PR|AU|XF|VF)\s?-?\d{2}(?!\d)/iu.test(condNote) ? slabFrom(`слаб ${condNote}`, '') : null);
   if (slab) flags.push('слаб');
   const weight = weightFrom(title, description, { denomKop, single: Boolean(foreign || world), isSet: flags.includes('несколько монет') });
   const finalMetal = weight ? 'silver' : metal;

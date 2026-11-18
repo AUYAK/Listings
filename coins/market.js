@@ -226,7 +226,7 @@ function assess({ parsed, price, rows = [], excludeId = null, catalog = null, ca
   const slabbedKey = slabbedSrc && (slabbedSrc.prices.MS64 != null ? 'MS64' : 'MS64+');
   const slabbed = slabbedSrc ? { source: slabbedSrc.source, grade: slabbedKey, price: slabbedSrc.prices[slabbedKey], samples: slabbedSrc.samples ? slabbedSrc.samples[slabbedKey] : null, windowYears: slabbedSrc.windowYears || null, period: slabbedSrc.period || null } : null;
   // Похожие продажи: список для карточки; если другого ориентира нет, а продаж той же монеты или серии в том же
-  // состоянии не меньше SIMILAR_MIN — их медиана и есть ориентир (уровень «тот же вес» ориентиром не становится)
+  // не меньше SIMILAR_MIN — их медиана и есть ориентир (уровень «тот же вес» ориентиром не становится)
   const similar = similarSales(rows, parsed, { excludeId, fine: metal && metal.grams > 0 && !metal.bulk ? metal.grams : null });
   if (reference == null && similar && similar.tier <= 1 && similar.sameGradeN >= SIMILAR_MIN) {
     reference = similar.ref; referenceSource = 'similar';
@@ -278,9 +278,12 @@ function quietLot(est, lot, { now = Date.now(), hours = QUIET_HOURS, maxBids = Q
 // Уровень сходства: 0 — тот же тип (номинал и год, как в медиане базы); 1 — тот же номинал той же серии (правитель,
 // период Германии: Империя / Веймар / Рейх, страна ± 20 лет); 2 — тот же металл и чистый вес ± 15% (цена серебра
 // в монетах такого размера). Слабы сравниваются только со слабами. Берётся лучший уровень, где что-то есть.
-// Внутри уровня — сначала ближайшие по состоянию, затем ближайшие по цене к их медиане (продажа за 600 р. в лучшем
-// состоянии рядом с лотом на 170 р. ничего не говорит), затем свежие.
-const SIMILAR_MIN = 3;      // столько продаж того же состояния нужно, чтобы медиана похожих стала ориентиром (решение о цене — за человеком)
+// Состояние со слов продавца в расчёт не берётся: оно случайно в обе стороны («VF» на UNC и «AU в блеске» на затёртой
+// монете), сравнивать — по фото ближайших продаж. Медиана — по всем продажам уровня; у слабов — по той же корзине
+// грейда (ему верим). В списке — ближайшие по цене к медиане (продажа за 600 р. рядом с лотом на 170 р. ничего
+// не говорит), та же монета раньше серии, затем свежие.
+const SIMILAR_MIN = 3;      // столько продаж нужно, чтобы медиана похожих стала ориентиром (решение о цене — за человеком)
+const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * q)))];
 const SIMILAR_SHOWN = 5;
 const dePeriod = (y) => (y <= 1918 ? 1 : y <= 1933 ? 2 : 3);
 const SKIP_FLAGS = ['копия', 'несколько монет', 'не монета'];
@@ -291,7 +294,6 @@ function similarSales(rows, parsed, { excludeId = null, fine = null, limit = SIM
   const ownKeys = new Set(own.filter((k) => k.level !== 'ruler').map((k) => k.key));
   const rulerKey = (own.find((k) => k.level === 'ruler') || {}).key || null;
   const slab = Boolean(parsed.slab);
-  const ownIdx = GRADE_ORDER.indexOf(parsed.grade);
   const seen = new Set();
   const found = [];
   for (const r of rows) {
@@ -317,31 +319,42 @@ function similarSales(rows, parsed, { excludeId = null, fine = null, limit = SIM
     // (канадский доллар на 18,66 г рядом с рублём Николая II за 176 р. ничего не говорит)
     else if (fine > 0 && rowFine > 0 && Math.abs(rowFine - fine) / fine <= 0.15
       && parsed.denomKop == null && !parsed.foreign && p.denomKop == null && !p.foreign) tier = 2;
+    // серия с другим весом металла — другая монета: полдоллара США 1952 (11,25 г серебра) и Кеннеди 1965–1970 (4,6 г)
+    if (tier === 1 && fine > 0 && rowFine > 0 && Math.abs(rowFine - fine) / fine > 0.15) tier = null;
     if (tier == null) continue;
     if (dup) seen.add(dup);
-    const idx = GRADE_ORDER.indexOf(r.grade);
-    const gdist = slab ? (bucketOf(p) === bucketOf(parsed) ? 0 : 1) : (idx < 0 || ownIdx < 0 ? 1.5 : Math.abs(idx - ownIdx));
+    const gdist = slab ? (bucketOf(p) === bucketOf(parsed) ? 0 : 1) : 0; // сырые монеты — состояние не учитывается
     found.push({
       tier, gdist, price, at: r.ended_at ? new Date(r.ended_at).getTime() : 0, bids: r.final_bids || 0, title: r.title || '', url: r.url || null,
       grade: p.slab ? `слаб ${[p.slab.company, p.slab.grade].filter(Boolean).join(' ') || '?'}` : r.grade || '?',
     });
   }
   if (!found.length) return null;
-  const tier = Math.min(...found.map((f) => f.tier));
-  const pool = found.filter((f) => f.tier === tier);
+  let tier = Math.min(...found.map((f) => f.tier));
+  let pool = found.filter((f) => f.tier === tier);
+  // той же монеты продано мало (в том же состоянии — меньше SIMILAR_MIN): одна-две продажи не ориентир, считаем вместе
+  // с серией — «3 марки 1912» с единственной продажей рядом с девятью продажами 3 марок Империи
+  if (tier === 0 && pool.filter((f) => f.gdist === 0).length < SIMILAR_MIN && found.some((f) => f.tier === 1)) {
+    tier = 1;
+    pool = found.filter((f) => f.tier <= 1);
+  }
   const g0 = Math.min(...pool.map((f) => f.gdist));
   const nearest = pool.filter((f) => f.gdist === g0);
+  // медиана — по всем продажам уровня в ближайшем состоянии, а не только по показанным в карточке
   const ref = median(nearest.map((f) => f.price));
   const off = (f) => Math.abs(Math.log(f.price / ref));
-  pool.sort((a, b) => a.gdist - b.gdist || off(a) - off(b) || b.at - a.at);
-  return { tier, n: pool.length, ref, sameGrade: g0 === 0, sameGradeN: g0 === 0 ? nearest.length : 0, items: pool.slice(0, limit) };
+  // в списке та же монета — раньше серии, дальше ближайшие по состоянию и цене
+  pool.sort((a, b) => a.gdist - b.gdist || a.tier - b.tier || off(a) - off(b) || b.at - a.at);
+  const sorted = nearest.map((f) => f.price).sort((a, b) => a - b);
+  // sameGradeN — сколько продаж вошло в медиану (у сырых монет — все продажи уровня); low–high — средняя половина продаж
+  return { tier, n: pool.length, ref, sameGradeN: g0 === 0 ? nearest.length : 0, low: quantile(sorted, 0.25), high: quantile(sorted, 0.75), items: pool.slice(0, limit) };
 }
 
 const escHtml = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const SIMILAR_WHAT = ['той же монеты', 'того же номинала и серии', 'иностранных монет того же веса металла'];
 function similarLines(s) {
   if (!s || !s.items.length) return [];
-  const head = `🧾 Похожие продажи ay.by — ${SIMILAR_WHAT[s.tier]}: ${s.n}${s.sameGradeN >= MIN_SAMPLES ? `, медиана в этом состоянии ${fmt(s.ref)}` : ''}`;
+  const head = `🧾 Похожие продажи ay.by — ${SIMILAR_WHAT[s.tier]}: ${s.n}${s.sameGradeN >= MIN_SAMPLES ? `, медиана ${fmt(s.ref)}${s.sameGradeN >= 4 && s.high > s.low ? `, половина продаж ${num(s.low)}–${fmt(s.high)}` : ''}` : ''}`;
   return [head, ...s.items.map((it) => {
     const day = it.at ? new Date(it.at).toLocaleDateString('ru-BY', { day: '2-digit', month: '2-digit', timeZone: 'Europe/Minsk' }) : '';
     const price = `${String(Math.round(it.price * 100) / 100).replace('.', ',')} р.`;
@@ -402,7 +415,9 @@ function formatEstimateLines(est) {
     lines.push(`⚪ Слаб дешёвой монеты: ориентир ${fmt(est.reference)} меньше ${fmt(SLAB_MIN_BYN)} — это в основном цена слабирования`);
   } else if (est.deviationPct != null) {
     const base = est.referenceSource === 'market' ? 'нашей базы' : est.referenceSource === 'similar' ? 'похожих продаж' : srcName(est.referenceSource).split(',')[0];
-    if (est.isBargain) lines.push(`🟢 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base} — выгодно`);
+    // медиана похожих продаж считается без состояния — «выгодно» здесь значит «посмотрите фото», а не готовый вывод
+    if (est.isBargain && est.referenceSource === 'similar') lines.push(`🟢 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже медианы похожих продаж — сравните фото: состояние не учтено`);
+    else if (est.isBargain) lines.push(`🟢 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base} — выгодно`);
     else if (est.deviationPct < 0) lines.push(`🟡 На ${-est.deviationPct}% (${fmt(est.gainByn)}) ниже ${base}`);
     else lines.push(`🔴 На ${est.deviationPct}% выше ${base}`);
   } else if (!est.reference) {

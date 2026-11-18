@@ -136,7 +136,14 @@ async function fetchLot(page, url) {
     out.bargain = /Возможен торг/.test(out.controlText);
     out.specs = {};
     const rows = document.querySelectorAll('.b-description__item table tr');
-    for (let i = 0; i < rows.length; i++) { const tds = rows[i].querySelectorAll('td'); if (tds.length === 2) out.specs[text(tds[0])] = text(tds[1]); }
+    // под строкой характеристики бывает уточнение продавца: <td colspan="2" class="b-description__desc">MS66</td> —
+    // так пишут грейд слаба, которого нет в заголовке (ay.by 5041899480)
+    let lastKey = null;
+    for (let i = 0; i < rows.length; i++) {
+      const tds = rows[i].querySelectorAll('td');
+      if (tds.length === 2) { lastKey = text(tds[0]); out.specs[lastKey] = text(tds[1]); }
+      else if (tds.length === 1 && lastKey && /b-description__desc/.test(tds[0].className) && text(tds[0])) out.specs[lastKey + ': уточнение'] = text(tds[0]);
+    }
     const items = document.querySelectorAll('.b-description__item');
     const descParts = [];
     for (let i = 0; i < items.length; i++) {

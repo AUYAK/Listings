@@ -1082,33 +1082,48 @@ check('похожие продажи: уровень сходства, ближ�
   ];
   const lot = parseCoin({ title: '3 марки 1912 Пруссия Вильгельм', sectionPath: null, conditionText: VF });
   // та же монета есть — показывается она
+  // та же монета продана один раз — мало: считается вместе с серией, но в списке она первая; медиана — по всем продажам,
+  // состояние со слов продавца не учитывается
   const same = cm.similarSales(rows, lot, { excludeId: 99 });
-  assert.strictEqual(same.tier, 0);
-  assert.deepStrictEqual(same.items.map((i) => i.price), [125]);
+  assert.strictEqual(same.tier, 1);
+  assert.strictEqual(same.items[0].price, 125);
+  assert.deepStrictEqual([same.n, same.sameGradeN, same.ref], [6, 6, 105]);
+  // три продажи той же монеты в том же состоянии — хватает их самих, серия не подмешивается
+  const three = cm.similarSales([...rows, sold(11, '3 марки 1912 Пруссия', 130, VF), sold(12, '3 марки 1912 A Пруссия', 115, VF)], lot);
+  assert.deepStrictEqual([three.tier, three.n, three.ref], [0, 3, 125]);
   // без неё — серия: 3 марки Империи; сначала VF, ближайшие к медиане 95, UNC за 600 — последним
   const series = cm.similarSales(rows.filter((r) => r.id !== 1), lot);
   assert.strictEqual(series.tier, 1);
   assert.strictEqual(series.n, 5);
-  assert.strictEqual(series.ref, 95);
-  assert.deepStrictEqual(series.items.map((i) => i.price), [100, 90, 110, 70, 600]);
+  assert.deepStrictEqual([series.ref, series.low, series.high], [100, 90, 110]);
+  assert.deepStrictEqual(series.items.map((i) => i.price), [100, 110, 90, 70, 600]); // ближайшие к медиане — первыми
   // трёх продаж в том же состоянии ещё нет — ориентиром не становится; с третьей — становится
-  const few = cm.assess({ parsed: lot, price: 50, rows: rows.filter((r) => ![1, 4, 5].includes(r.id)) });
+  const few = cm.assess({ parsed: lot, price: 50, rows: rows.filter((r) => ![1, 4, 5, 6].includes(r.id)) });
   assert.strictEqual(few.reference, null);
   assert.strictEqual(cm.SIMILAR_MIN, 3);
   const more = cm.assess({ parsed: lot, price: 50, rows: [...rows.filter((r) => r.id !== 1), sold(10, '3 марки 1914 Пруссия', 95, VF)] });
   assert.strictEqual(more.referenceSource, 'similar');
-  assert.strictEqual(more.reference, 95);
+  assert.strictEqual(more.reference, 97.5);
   assert.strictEqual(more.isBargain, true);
   const text = cm.formatEstimateLines(more).join(' | ');
-  assert.ok(text.includes('🧾 Похожие продажи ay.by — того же номинала и серии: 6, медиана в этом состоянии 95 р.'), text);
+  assert.ok(text.includes('🧾 Похожие продажи ay.by — того же номинала и серии: 6, медиана 98 р., половина продаж 90–110 р.'), text);
   assert.ok(text.includes('<a href="https://ay.by/lot/x-10.html">95 р.</a> · 10.11 · VF · 5 ст. · 3 марки 1914 Пруссия'), text);
-  assert.ok(text.includes('ниже похожих продаж — выгодно'), text);
+  assert.ok(text.includes('ниже медианы похожих продаж — сравните фото: состояние не учтено'), text);
   assert.ok(!text.includes('ещё не было'));
   // минимальная цена продавца не пройдена — карточка с предупреждением
   const { buildCaption } = require('./coins');
   const cap = buildCaption({ name: 'Монеты (серебро)', emoji: '🪙' }, { title: '3 марки 1912 Пруссия', price: 50, saleType: 'auction', bids: 3, reserve: 'not_met', url: 'https://ay.by/lot/x-11.html', photos: [] }, lot, true, more);
   assert.ok(cap.includes('⚠️ Минимальная цена продавца не пройдена'), cap);
-  assert.ok(cap.includes('ниже похожих продаж — выгодно'), cap);
+  assert.ok(cap.includes('ниже медианы похожих продаж — сравните фото'), cap);
+  // серия с другим весом серебра — не та монета: полдоллара 1952 (11,25 г) и Кеннеди 1968 (4,6 г)
+  const half = parseCoin({ title: '50 центов 1952 США Карвер серебро', sectionPath: null, conditionText: UNC });
+  const halves = [sold(20, '50 центов 1968 США Кеннеди серебро', 50, UNC, { fine_g: 4.6 }), sold(21, '50 центов 1964 США Кеннеди серебро', 90, UNC, { fine_g: 11.25 })];
+  assert.deepStrictEqual(cm.similarSales(halves, half, { fine: 11.25 }).items.map((i) => i.price), [90]);
+  // «MS66» в уточнении к состоянию — слаб, сравнивается только со слабами
+  const slabbed = parseCoin({ title: '50 центов 1952 США Карвер серебро', sectionPath: null, conditionText: UNC, specs: { 'Состояние: уточнение': 'MS66' } });
+  assert.strictEqual(slabbed.slab.grade, 'MS66');
+  assert.strictEqual(cm.similarSales(halves, slabbed, { fine: 11.25 }), null);
+  assert.strictEqual(parseCoin({ title: '50 центов 1952 США', sectionPath: null, specs: { 'Состояние: уточнение': 'небольшие царапины' } }).slab, null);
   // ни типа, ни серии — серебро того же веса
   const world = cm.similarSales(rows, parseCoin({ title: 'Австралия 1 флорин 1950 серебро', sectionPath: null, conditionText: VF }), { fine: 18 });
   assert.strictEqual(world.tier, 2);
