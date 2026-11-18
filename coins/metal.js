@@ -76,8 +76,19 @@ const UK = UK_SILVER.flatMap(([unit, value, gross]) => [[1816, 1919, 0.925], [19
 // Иностранные монеты (parse.worldFrom): [страна или null — любая, единица, номинал, год от, год до, металл, грамм,
 // пояснение — необязательно]. Применяется только если металл монеты уже известен (поле «Металл» ay.by, заголовок или
 // правило года в parse.metalFrom): «20 лир» 1970-х — не золото.
+// Канада: доллар 1935–1967 — 23,33 г 800; памятные серебряные 1971–1991 — 23,33 г 500 (тот же номинал бывает
+// никелевым — строка работает, только если серебро уже известно); 1992–2011 — 25,175 г 925; 10/25/50 центов
+// 1920–1967 — серебро 800 (до 1919 — 925)
+const CANADA = [
+  ['Канада', 'доллар', 1, 1935, 1967, 'silver', 18.66, purityBasis(23.33, 0.8)], ['Канада', 'доллар', 1, 1971, 1991, 'silver', 11.66, purityBasis(23.33, 0.5)],
+  ['Канада', 'доллар', 1, 1992, 2011, 'silver', 23.29, purityBasis(25.175, 0.925)],
+  ['Канада', 'цент', 50, 1920, 1967, 'silver', 9.33, purityBasis(11.66, 0.8)], ['Канада', 'доллар', 0.5, 1920, 1967, 'silver', 9.33, purityBasis(11.66, 0.8)],
+  ['Канада', 'цент', 25, 1920, 1967, 'silver', 4.67, purityBasis(5.83, 0.8)],
+  ['Канада', 'цент', 10, 1920, 1967, 'silver', 1.87, purityBasis(2.33, 0.8)],
+];
+
 const WORLD = [
-  ...UK,
+  ...UK, ...CANADA,
   ['США', 'доллар', 1, 1878, 1935, 'silver', 24.06], ['США', 'доллар', 1, 1986, 2100, 'silver', 31.1], // Морган/Пис; Silver Eagle
   ['США', 'цент', 50, 1892, 1964, 'silver', 11.25], ['США', 'цент', 50, 1965, 1970, 'silver', 4.6],
   ['США', 'цент', 25, 1892, 1964, 'silver', 5.62], ['США', 'цент', 10, 1892, 1964, 'silver', 2.25],
@@ -98,19 +109,11 @@ const WORLD = [
 
 const byDenom = (table, p) => table.find(([d, from, to]) => d === p.denomKop && p.year >= from && p.year <= to);
 
-// { metal: 'silver'|'gold', grams, basis? } или null, если монета не из драгметалла или стандарт неизвестен.
-// Лот на вес («Серебро 500 гр», parse.weightFrom): чистое серебро = вес × проба, bulk — из чего посчитано.
-// Порядок: таблицы Империи/СССР до 1931 (стандарт чеканки) → марки Германии и иностранные → текст лота
-// (унции, вес × проба) → современные памятные (нижняя планка по номиналу).
-function fineContent(parsed) {
-  if (parsed && parsed.weight && parsed.weight.fineGrams > 0) {
-    const w = parsed.weight;
-    return { metal: 'silver', grams: w.fineGrams, bulk: { grams: w.grams, purity: w.purity, purityAssumed: w.purityAssumed } };
-  }
+// Стандарт чеканки из таблиц: Империя/СССР до 1931, марки Германии, иностранные. { metal, grams, basis? } или null
+function tableContent(parsed) {
   if (!parsed || (parsed.metal !== 'silver' && parsed.metal !== 'gold')) return null;
-  const gold = parsed.metal === 'gold';
   if (parsed.denomKop != null && parsed.year) {
-    const row = byDenom(gold ? GOLD : SILVER, parsed);
+    const row = byDenom(parsed.metal === 'gold' ? GOLD : SILVER, parsed);
     if (row) return { metal: parsed.metal, grams: row[3] };
   }
   const f = parsed.foreign;
@@ -124,11 +127,40 @@ function fineContent(parsed) {
       && (!parsed.year || (parsed.year >= from && parsed.year <= to)) && (parsed.year || c === null));
     if (row) return { metal: parsed.metal, grams: row[6], ...(row[7] ? { basis: row[7] } : {}) };
   }
+  return null;
+}
+
+// Продавец пишет одно, таблица стандартов — другое (расхождение больше MISMATCH_PCT): считаем по таблице, а разницу
+// показываем в карточке и храним в базе (parsed.contentMismatch) — такие лоты потом сверяются вручную.
+// { table, stated, statedBasis } или null
+const MISMATCH_PCT = 10;
+function contentMismatch(parsed) {
+  const stated = parsed && parsed.content && parsed.content.fineGrams > 0 ? parsed.content : null;
+  const table = stated && !(parsed.weight && parsed.weight.fineGrams > 0) ? tableContent(parsed) : null;
+  if (!table || Math.abs(stated.fineGrams - table.grams) / table.grams * 100 <= MISMATCH_PCT) return null;
+  return { table: table.grams, stated: stated.fineGrams, statedBasis: stated.basis || null };
+}
+
+// { metal: 'silver'|'gold', grams, basis?, mismatch? } или null, если монета не из драгметалла или стандарт неизвестен.
+// Лот на вес («Серебро 500 гр», parse.weightFrom): чистое серебро = вес × проба, bulk — из чего посчитано.
+// Порядок: таблицы стандартов (они главнее слов продавца) → текст лота (унции, вес × проба) → современные
+// памятные (нижняя планка по номиналу).
+function fineContent(parsed) {
+  if (parsed && parsed.weight && parsed.weight.fineGrams > 0) {
+    const w = parsed.weight;
+    return { metal: 'silver', grams: w.fineGrams, bulk: { grams: w.grams, purity: w.purity, purityAssumed: w.purityAssumed } };
+  }
+  if (!parsed || (parsed.metal !== 'silver' && parsed.metal !== 'gold')) return null;
+  const table = tableContent(parsed);
+  if (table) {
+    const mismatch = contentMismatch(parsed);
+    return mismatch ? { ...table, mismatch } : table;
+  }
   if (parsed.content && parsed.content.fineGrams > 0) return { metal: parsed.metal, grams: parsed.content.fineGrams, basis: parsed.content.basis };
   if (parsed.denomKop != null) {
     // без года («Белая синица. 10 рублей. Серебро.») — наименьший вес номинала за все годы
-    const table = gold ? MODERN_GOLD : MODERN_SILVER;
-    const rows = parsed.year ? [byDenom(table, parsed)].filter(Boolean) : table.filter(([d]) => d === parsed.denomKop);
+    const table2 = parsed.metal === 'gold' ? MODERN_GOLD : MODERN_SILVER;
+    const rows = parsed.year ? [byDenom(table2, parsed)].filter(Boolean) : table2.filter(([d]) => d === parsed.denomKop);
     if (rows.length) return { metal: parsed.metal, grams: Math.min(...rows.map((r) => r[3])), basis: 'наименьший из ходовых весов этого номинала' };
   }
   return null;
@@ -150,4 +182,4 @@ async function metalValueLive(parsed) {
   return metalValue(parsed, prices);
 }
 
-module.exports = { fineContent, metalValue, metalValueLive, purityBasis, SILVER, GOLD, MODERN_SILVER, MODERN_GOLD, GERMAN, WORLD };
+module.exports = { fineContent, tableContent, contentMismatch, metalValue, metalValueLive, purityBasis, SILVER, GOLD, MODERN_SILVER, MODERN_GOLD, GERMAN, WORLD };

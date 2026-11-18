@@ -307,6 +307,11 @@ function formatEstimateLines(est) {
     const basis = m.basis ? ` — ${m.basis}` : '';
     lines.push(`⚖️ Металл: ${bulk}${what}${basis} ≈ ${fmt(m.value)}${m.pricePerG ? ` (НБРБ ${String(m.pricePerG).replace('.', ',')} р./г)` : ''}`);
   }
+  if (est.metal && est.metal.mismatch) {
+    const mm = est.metal.mismatch;
+    const g = (n) => String(n).replace('.', ',');
+    lines.push(`⚠️ Расхождение: по лоту ${g(mm.stated)} г чистого металла${mm.statedBasis ? ` (${mm.statedBasis})` : ''}, по стандарту монеты ${g(mm.table)} г — считаем по стандарту, проверьте`);
+  }
   if (est.metal && est.metal.below) {
     lines.push(`🟢 На ${fmt(est.metal.gain)} ниже стоимости металла — выгодно при любом состоянии`);
   } else if (est.slabCheap) {

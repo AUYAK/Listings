@@ -217,6 +217,7 @@ check('завершённый лот ay.by: «Завершён … Лот про
   assert.strictEqual(sold.finalPrice, 3.5);
   assert.strictEqual(sold.price, 3.5);
   assert.strictEqual(sold.endsAt, null);
+  assert.strictEqual(sold.saleType, 'buy_now'); // «1 сделка» — выкуплен, а не аукцион с одной ставкой
   assert.strictEqual(sold.categoryPath, 'Монеты › Россия Российская Империя (до 1917) 1894-1917 (Николай II) Медь');
   assert.strictEqual(sold.endedAt.toISOString(), `${new Date().getUTCFullYear()}-10-26T13:09:04.000Z`); // минское 16:09 = 13:09 UTC
   assert.strictEqual(decideOutcome({ bids: 0 }, sold), 'sold');
@@ -1051,6 +1052,54 @@ check('Великобритания до 1946: вес из таблицы с п�
   assert.strictEqual(fineContent(parseCoin({ title: 'Великобритания 1 шиллинг 1943', sectionPath: null })).grams, 2.83);
   assert.strictEqual(fineContent(parseCoin({ title: 'Half crown 1937 Великобритания', sectionPath: null })).grams, 7.07);
   assert.notStrictEqual(parseCoin({ title: '1/2 кроны 1950 Великобритания', sectionPath: null }).metal, 'silver');
+});
+check('«0.375 troy oz» и «чистого серебра 11,66 г» — не унция', () => {
+  // ay.by 5041988499: Канада 1 доллар 1972, металл считался по 1 унции (31,1 г вместо 11,66 г)
+  const { contentFrom } = require('./coins/parse');
+  const desc = 'Металл: Серебро 500 пробы\nОбщая масса: 23,33 г\nЧистого серебра (в чистоте): 11,66 г (0.375 troy oz)\nДиаметр: 36,07 мм';
+  assert.strictEqual(contentFrom('Канада 1 доллар 1972, Вояжёр (Voyageur)', desc).fineGrams, 11.66);
+  assert.strictEqual(contentFrom('Монета', 'вес 0.5 troy oz серебра').fineGrams, 15.55);
+  assert.strictEqual(contentFrom('2 доллара Ниуэ 1 oz серебро 999', '').fineGrams, 31.1);
+});
+check('Канада: доллары и центы по таблице', () => {
+  const { fineContent } = require('./coins/metal');
+  const fc = (title, specs = {}) => fineContent(parseCoin({ title, sectionPath: null, specs }));
+  assert.deepStrictEqual(fc('Канада 1 доллар 1965 год, AU. Елизавета II. Индейцы. Каноэ.'), { metal: 'silver', grams: 18.66, basis: '23,33 г × проба 800' });
+  assert.strictEqual(fc('Канада 1 доллар 1977, Серебряный юбилей', { 'Металл': 'Серебро' }).grams, 11.66);
+  assert.strictEqual(fc('Канада 1 доллар 1973'), null); // никель, серебро не указано
+  assert.strictEqual(fc('Канада 50 центов (1/2 доллар) 1964 год, AU').grams, 9.33);
+  assert.strictEqual(parseCoin({ title: 'Канада 1 доллар 1958 год. Королева Великобритании', sectionPath: null }).world.country, 'Канада');
+});
+check('история продаж: какие сделки из отзывов открывать', () => {
+  const { historyCandidate } = require('./coins');
+  assert.strictEqual(historyCandidate('С рубля без мц! 50 эскудо 1968 Португалия - Кабрал - серебро!'), true);
+  assert.strictEqual(historyCandidate('3 марки 1911 Пруссия'), true); // серебро по таблице, слова «серебро» нет
+  assert.strictEqual(historyCandidate('Шри-Ланка 10 рупий 2013'), false);
+  assert.strictEqual(historyCandidate('Сертификат к монете 20 рублей 2008 серебро'), false);
+  assert.strictEqual(historyCandidate('Копия 1 рубль 1924 серебро'), false);
+});
+check('расхождение лота с таблицей стандартов: считаем по таблице, отметка в разборе и карточке', () => {
+  const { fineContent } = require('./coins/metal');
+  const cm = require('./coins/market');
+  const p = parseCoin({ title: 'Канада 1 доллар 1965 Вояжёр', sectionPath: null, description: 'Чистого серебра: 31,1 г' });
+  assert.deepStrictEqual(p.contentMismatch, { table: 18.66, stated: 31.1, statedBasis: 'указано 31,1 г чистого металла' });
+  assert.strictEqual(fineContent(p).grams, 18.66);
+  const est = cm.assess({ parsed: p, price: 100, metal: { ...fineContent(p), pricePerG: 4.37, value: 81.5 } });
+  assert.ok(cm.formatEstimateLines(est).some((l) => l.startsWith('⚠️ Расхождение: по лоту 31,1 г') && l.includes('по стандарту монеты 18,66 г')));
+  // совпадает с таблицей — отметки нет
+  assert.strictEqual(parseCoin({ title: 'Канада 1 доллар 1965', sectionPath: null, description: 'Чистого серебра: 18,66 г' }).contentMismatch, undefined);
+});
+check('«без забоин», «отсутствуют… следы износа», «не чищена» — не дефект', () => {
+  const { flagsFrom } = require('./coins/parse');
+  // ay.by 5041988554, 5041988499: «⚠️ повреждения» по заверениям продавца
+  assert.deepStrictEqual(flagsFrom('Канада 1 доллар 1977', 'Отсутствуют грубые дефекты, забоины или следы износа. Отчеканена в Оттаве.'), []);
+  assert.deepStrictEqual(flagsFrom('Канада 1 доллар 1972', 'Отличное состояние, без забоин и следов обращения.'), []);
+  assert.deepStrictEqual(flagsFrom('1 рубль 1924', 'Монета не чищена.'), []);
+  assert.deepStrictEqual(flagsFrom('1 рубль 1924', 'Нет коробки, есть царапины.'), ['повреждения']);
+  assert.deepStrictEqual(flagsFrom('1 рубль 1924 царапины', ''), ['повреждения']);
+  assert.deepStrictEqual(flagsFrom('1 рубль 1924', 'Без коробки. Забоина на гурте.'), ['повреждения']);
+  assert.deepStrictEqual(flagsFrom('1 рубль 1924', 'Без коробки, царапина на аверсе'), ['повреждения']);
+  assert.deepStrictEqual(flagsFrom('20 копеек 1925 чищеная', ''), ['чистка']);
 });
 check('СССР 20 копеек: 1930 — серебро, 1931 — никель, если серебро не указано', () => {
   const { fineContent } = require('./coins/metal');

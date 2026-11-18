@@ -3,7 +3,8 @@
 // тип продажи, срок, продавец, минимальная цена) → решение по лоту (выгодно / тихий лот / подождать / закрыть) →
 // дочитывание старых лотов порциями → итоги по истёкшим лотам (цена, победитель) → рейтинги победителей.
 // Отдельно раз в несколько минут — лента новых лотов всех разделов (scanFeed): дешёвое «купить сейчас» не ждёт цикла.
-// Запуск: node coins.js (pm2: coins-monitor). Нужны миграции 011–015.
+// В конце цикла — история продаж через отзывы покупателей и продавцов (collectHistory).
+// Запуск: node coins.js (pm2: coins-monitor). Нужны миграции 011–017.
 require('dotenv').config();
 const { chromium } = require('playwright');
 const store = require('./store');
@@ -43,6 +44,10 @@ const PRECLOSE_MIN = parseInt(process.env.COINS_PRECLOSE_MIN || '40', 10);
 const PRECLOSE_STALE_MIN = 15;
 const PRECLOSE_BATCH = 40;
 const SECTIONS_TTL_MS = 24 * 3600e3;
+// История продаж через отзывы (collectHistory): пользователей и страниц лотов за цикл; COINS_HISTORY_LOTS=0 — выключить
+const HISTORY_USERS = parseInt(process.env.COINS_HISTORY_USERS || '2', 10);
+const HISTORY_LOTS = parseInt(process.env.COINS_HISTORY_LOTS || '40', 10);
+const HISTORY_PAGES = 60; // страниц отзывов на вкладку: по 10 сделок, ссылки на лоты кончаются раньше (~60 дней)
 const SELLER_MAX_PAGES = parseInt(process.env.COINS_SELLER_MAX_PAGES || '15', 10); // по 100 лотов
 // Лента новых лотов всех монетных разделов (coins.ay.by/new/, сортировка «Новые»): дешёвое «купить сейчас» опытные
 // покупатели забирают за часы, а полный цикл по разделам идёт долго. Раз в FEED_INTERVAL_MS — 1–2 страницы ленты:
@@ -792,6 +797,96 @@ async function feedTick() {
   }
 }
 
+// История продаж: отзывы покупателей и продавцов наших проданных лотов → ссылки на их другие сделки за ~60 дней →
+// страницы проданных лотов. В базу попадают продажи серебра и золота, которые шли до запуска мониторов или мимо них
+// (металл только в поле «Металл», лот выкуплен до прохода ленты). Уведомлений по ним нет: итог записывается сразу.
+function historyCandidate(title) {
+  const p = parseCoin({ title, sectionPath: null });
+  if (p.flags.includes('не монета') || p.flags.includes('копия')) return false;
+  return p.isPrecious || FEED_HINT.test(title || '');
+}
+
+async function readFeedback(page, userId) {
+  let found = 0, queued = 0;
+  for (const tab of ['buyer_all', 'seller_all']) {
+    for (let n = 1; n <= HISTORY_PAGES; n++) {
+      const r = await ayby.scanFeedback(page, userId, tab, n);
+      ok();
+      if (!r.deals.length) break; // сделок нет, они старше 60 дней или продавец скрывает завершённые лоты
+      found += r.deals.length;
+      queued += await cstore.queueHistory(r.deals.filter((d) => !owners.has(d.id) && historyCandidate(d.title)));
+      if (r.entries < 10) break;
+      await next(page);
+    }
+  }
+  await cstore.markHistoryRead(userId);
+  return { found, queued };
+}
+
+async function saveHistoryLot(page, row) {
+  if (owners.has(row.external_id)) return 'known';
+  const r = await fetchParsed(page, row.url, null, row.external_id);
+  ok();
+  if (r.gone) return 'gone';
+  const { lot, parsed } = r;
+  if (!lot.ended) return 'active'; // перевыставлен и снова идёт — его ведут мониторы
+  if (!lot.sold) return 'unsold';
+  if (lot.categoryPath ? !/монет/i.test(lot.categoryPath) : !(parsed.denomination && parsed.year)) return 'not_coin';
+  const takers = monitors.filter((m) => m.feed && matchesMonitor(m, parsed, lot.categoryPath) && !parsed.flags.includes('копия'));
+  if (!takers.length) return 'other_metal';
+  const card = { id: row.external_id, title: lot.title, price: lot.price, url: row.url, thumb: (lot.photos || [])[0] || null, bids: lot.bids, endsAt: null };
+  for (const monitor of takers) {
+    const { listingId } = await store.saveListing(monitor.key, listingFromCard(card));
+    await cstore.upsertCard(listingId, monitor, 'history', card);
+    await saveFetched(listingId, monitor.key, lot, parsed);
+    await cstore.recordOutcome(listingId, {
+      outcome: 'sold', finalPrice: lot.finalPrice ?? lot.price, finalBids: lot.bids, endedAt: lot.endedAt || row.deal_date || null,
+      statusText: `история (отзывы); ${lot.statusText || ''}`.slice(0, 300), winner: lot.winner, winnerId: lot.winnerId,
+    });
+    if (worthPhotos(monitor, parsed, Math.max(lot.bids || 0, 1))) {
+      const files = await photos.saveLotPhotos(row.external_id, lot.photos || [], null);
+      if (files.length) await cstore.savePhotoFiles(listingId, files);
+    }
+    if (!owners.has(row.external_id)) owners.set(row.external_id, new Set());
+    owners.get(row.external_id).add(monitor.key);
+  }
+  if (lot.winnerId) await cstore.upsertUser({ id: lot.winnerId, nick: lot.winner }, { checked: false }).catch(() => {});
+  return 'saved';
+}
+
+let historyWarned = false;
+async function collectHistory(page) {
+  if (!HISTORY_LOTS) return;
+  let pending;
+  try { pending = await cstore.historyPending(); } catch (err) {
+    if (!historyWarned) { historyWarned = true; console.warn(`  [История] ${err.message} (применить migrations/017_coin_history.sql)`); }
+    return;
+  }
+  // отзывы читаем, только когда очередь лотов почти разобрана
+  if (pending < HISTORY_LOTS) {
+    for (const id of await cstore.historyUsers(HISTORY_USERS)) {
+      try {
+        const r = await readFeedback(page, id);
+        console.log(`  [История] отзывы ${id}: сделок со ссылкой ${r.found}, в очередь ${r.queued}`);
+      } catch (err) { console.warn(`  [История] отзывы ${id}: ${err.message}`); failed(err); }
+    }
+  }
+  const counts = {};
+  for (const row of await cstore.historyQueue(HISTORY_LOTS)) {
+    let result;
+    try { result = await saveHistoryLot(page, row); } catch (err) {
+      console.warn(`  [История] ${row.url}: ${err.message}`);
+      failed(err); // ay.by ограничивает — выходим, лот остаётся в очереди
+      result = 'error';
+    }
+    await cstore.historyDone(row.external_id, result);
+    counts[result] = (counts[result] || 0) + 1;
+    await next(page);
+  }
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (total) console.log(`  [История] лотов ${total}: ${Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', ')}; в очереди ещё ${Math.max(0, pending - total)}`);
+}
+
 async function cycle(isFirstRun) {
   console.log(`[${ts()}] Coins: checking...`);
   strikes = 0;
@@ -820,6 +915,7 @@ async function cycle(isFirstRun) {
     }
     try { await deepScan(page); } catch (err) { console.error('  [Глубокий] Error:', err.message); }
     try { await refreshWinners(page); } catch (err) { console.error('  [Users] Error:', err.message); }
+    try { await collectHistory(page); } catch (err) { console.error('  [История] Error:', err.message); }
   } finally {
     await favorites.close();
     await browser.close();
@@ -846,4 +942,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildCaption, roundsLine, cardWanted, decideOutcome, worthNotifying, worthPhotos, notifyTiming, matchesMonitor, assessLot, considerLot, endsAtNight, listUrl, feedCandidate, feedOwners, AUCTION_NOTIFY_HOURS, PRECLOSE_MIN };
+module.exports = { buildCaption, roundsLine, cardWanted, decideOutcome, worthNotifying, worthPhotos, notifyTiming, matchesMonitor, assessLot, considerLot, endsAtNight, listUrl, feedCandidate, feedOwners, historyCandidate, AUCTION_NOTIFY_HOURS, PRECLOSE_MIN };

@@ -217,6 +217,7 @@ function interpretLot(raw, code = 200) {
   if (raw.hasBidButton && raw.hasBuyNow) saleType = 'auction_buynow';
   else if (raw.hasBidButton) saleType = 'auction';
   else if (raw.hasBuyNow) saleType = 'buy_now';
+  else if (/сделк/.test(raw.bidsText || '')) saleType = 'buy_now'; // завершённый лот, «1 сделка» вместо «N ставок» — выкуплен
   else if (bids > 0) saleType = 'auction';
   const soldPrice = sold ? parsePrice(raw.soldText.match(/за\s*([\d\s.,]+)/)[1]) : null;
   const price = soldPrice ?? parsePrice(raw.priceText);
@@ -322,9 +323,41 @@ async function fetchUser(page, userId) {
   return u && u.nick ? { id: String(userId), ...u } : null;
 }
 
+// Отзывы пользователя: tab 'buyer_all' — что купил, 'seller_all' — что продал. По 10 сделок на странице, свежие сверху:
+// <dd class="buy">3 ноября 2026 купил <a href="…/lot/…-ID.html">заголовок</a></dd>. Ссылка на лот есть ~60 дней после
+// торгов (дальше — заголовок без ссылки); продавцы могут скрывать свои завершённые лоты (тогда ссылок нет вовсе).
+// → { entries — сделок на странице, deals: [{ id, url, title, date }] — сделки со ссылкой }
+function feedbackUrl(userId, tab, pageNo = 1) {
+  return `https://ay.by/personal/auctions_comment.phtml?id=${encodeURIComponent(userId)}&show=${tab}&page=${pageNo}`;
+}
+
+async function scanFeedback(page, userId, tab, pageNo = 1) {
+  const resp = await page.goto(feedbackUrl(userId, tab, pageNo), { waitUntil: 'domcontentloaded', timeout: NAV_TIMEOUT });
+  if (resp && resp.status() === 404) return { entries: 0, deals: [] };
+  await assertNotVerification(page);
+  await page.waitForSelector('ul.comments, h1', { timeout: 10000 }).catch(() => {});
+  const raw = await page.evaluate(() => {
+    const blocks = document.querySelectorAll('ul.comments .comment-block');
+    const deals = [];
+    for (let i = 0; i < blocks.length; i++) {
+      const dd = blocks[i].querySelector('dd.buy');
+      const link = dd && dd.querySelector('a[href*="/lot/"]');
+      if (!link) continue;
+      deals.push({ url: link.href.split('?')[0], title: link.textContent.replace(/\s+/g, ' ').trim(), dateText: dd.textContent.replace(/\s+/g, ' ').trim().slice(0, 40) });
+    }
+    return { entries: blocks.length, deals };
+  });
+  const deals = [];
+  for (const d of raw.deals) {
+    const id = (d.url.match(/-(\d+)\.html/) || [null, null])[1];
+    if (id) deals.push({ id, url: d.url, title: d.title, date: parseEndedAt(`${(d.dateText.match(/\d{1,2}\s+[а-яё]+(?:\s+\d{4})?/i) || [''])[0]} в 12:00`) });
+  }
+  return { entries: raw.entries, deals };
+}
+
 // Ник продавца из карточки списка: «maybach - 888 99.8%» → «maybach - 888» (процент положительных отзывов в конце)
 function authorNick(author) {
   return (author || '').replace(/\s+\d+(?:[.,]\d+)?\s*%\s*$/, '').trim() || null;
 }
 
-module.exports = { discoverSubsections, scanListPage, scanSellerPage, sellerPageUrl, authorNick, fetchLot, fetchUser, interpretLot, parseEndedAt, parseTimeLeft, parsePrice, isBlocked, NAV_TIMEOUT, SELLER_PAGE_SIZE };
+module.exports = { discoverSubsections, scanListPage, scanSellerPage, sellerPageUrl, scanFeedback, feedbackUrl, authorNick, fetchLot, fetchUser, interpretLot, parseEndedAt, parseTimeLeft, parsePrice, isBlocked, NAV_TIMEOUT, SELLER_PAGE_SIZE };

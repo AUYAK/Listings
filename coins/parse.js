@@ -236,7 +236,8 @@ function purityFrom(text) {
 // «Ag 925» + «Вес монеты: 33,62 г» (поле ay.by или текст) → вес × проба. Возвращает { fineGrams, basis } или null.
 const OUNCE_G = 31.1035;
 // «Серебро 999.Унция» (ay.by 5041929853): проверка «перед числом не цифра/точка» — только для числа, не для слова
-const OUNCE = /(?:(?<![\d.,\/])(1\s*\/\s*(?:2|4|10|20)|½|¼|\d+(?:[.,]\d+)?)\s*)?(?:тройск\p{L}*\s+)?(?:унци\p{L}*|oz)(?!\p{L})/iu;
+// «0.375 troy oz» — число через «troy»/«тройская» (ay.by 5041988499: читалось как «oz» без числа = 1 унция)
+const OUNCE = /(?:(?<![\d.,\/])(1\s*\/\s*(?:2|4|10|20)|½|¼|\d+(?:[.,]\d+)?)\s*)?(?:(?:тройск\p{L}*|troy)\s+)?(?:унци\p{L}*|oz)(?!\p{L})/iu;
 const PURITY_NUMBER = /^(?:9999|999|958|925|916|900|875|835|800|750|585|583|500)$/;
 const STATED_FINE = /(?:чист\p{L}*\s+(?:серебр|золот|металл)\p{L}*|содержани\p{L}*\s+(?:чист\p{L}*\s+)?(?:серебр|золот|металл)\p{L}*)[^\d\n]{0,15}(\d+(?:[.,]\d+)?)\s*(?:г|гр|грамм\p{L}*)(?!\p{L})/iu;
 const GROSS = /(?:вес|масса)\p{L}*[^\d\n]{0,12}(\d+(?:[.,]\d+)?)\s*(?:г|гр|грамм\p{L}*)(?!\p{L})/iu;
@@ -245,6 +246,12 @@ const fmtG = (n) => String(Math.round(n * 100) / 100).replace('.', ',');
 
 function contentFrom(title, description, specs = {}) {
   const texts = [title || '', description || ''];
+  // «Чистого серебра: 11,66 г» точнее унций: в том же описании бывает «(0.375 troy oz)»
+  for (const t of texts) {
+    const m = t.match(STATED_FINE);
+    const g = m ? parseFloat(m[1].replace(',', '.')) : null;
+    if (g > 0.5 && g <= 1100) return { fineGrams: g, basis: `указано ${fmtG(g)} г чистого металла` };
+  }
   for (const [i, t] of texts.entries()) {
     const m = t.match(OUNCE);
     if (m) {
@@ -252,11 +259,6 @@ function contentFrom(title, description, specs = {}) {
       const oz = m[1] && PURITY_NUMBER.test(m[1]) ? 1 : fracValue(m[1] && m[1].replace(/\s/g, ''));
       if (oz > 0 && oz <= 5) return { fineGrams: Math.round(oz * OUNCE_G * 100) / 100, basis: `${i ? 'описание' : 'заголовок'}: ${String(oz).replace('.', ',')} унц.` };
     }
-  }
-  for (const t of texts) {
-    const m = t.match(STATED_FINE);
-    const g = m ? parseFloat(m[1].replace(',', '.')) : null;
-    if (g > 0.5 && g <= 1100) return { fineGrams: g, basis: `указано ${fmtG(g)} г чистого металла` };
   }
   const purity = purityFrom(title) ?? purityFrom(description);
   if (!purity) return null;
@@ -288,6 +290,7 @@ const WORLD_WORDS = [
 const COUNTRIES = [
   ['США', /(?<!\p{L})(?:сша|usa)(?!\p{L})|соединенн\p{L}*\s+штат|морган|morgan|кеннеди|kennedy|peace\s*dollar/iu],
   ['Польша', /польш|polsk/iu], ['Беларусь', /беларус|белорус|нб\s?рб|нацбанк/iu], ['Германия', /германи|рейх/iu],
+  ['Канада', /канад|canada/iu], // раньше Великобритании: «Канада … Королева Великобритании»
   ['Великобритания', /британ|англи/iu], ['Финляндия', /финл|финск|finland|suomi|markk|penni/iu],
 ];
 
@@ -408,6 +411,10 @@ function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign
   // только по слову). С 1947 — медно-никель
   if (world && world.country === 'Великобритания' && year >= 1816 && year <= 1946
     && (['крона', 'шиллинг'].includes(world.unit) || (world.unit === 'пенс' && world.value === 6))) return 'silver';
+  // Канада: доллар 1935–1967, 10/25/50 центов 1920–1967 — серебро 800. Позже — никель (памятные серебряные — по слову)
+  if (world && world.country === 'Канада' && year >= 1920 && year <= 1967
+    && ((world.unit === 'доллар' && world.value === 1 && year >= 1935) || (world.unit === 'доллар' && world.value === 0.5)
+      || (world.unit === 'цент' && [10, 25, 50].includes(world.value)))) return 'silver';
   return null;
 }
 
@@ -454,10 +461,27 @@ const ACCESSORY = /^\s*(?:сертификат|футляр|коробк|кор�
 // раздел ay.by «Монеты › Беларусь (после 1991) › Буклеты, сертификаты» — надёжнее заголовка (виден со страницы лота)
 const ACCESSORY_SECTION = /буклет|сертификат/iu;
 
+// «без забоин», «Отсутствуют грубые дефекты, забоины или следы износа», «не чищена» — продавец заверяет, что дефекта нет
+// (ay.by 5041988554: «⚠️ повреждения» по такому описанию). «без / нет / не» — в той же части фразы до запятой
+// («без коробки, царапина» — дефект), «отсутствуют» — во всём предложении (перечисление через запятую)
+const NEGATABLE = new Set(['отверстие', 'чистка', 'повреждения']);
+const NEGATION_NEAR = /(?<!\p{L})(?:без|нет|не|ни)(?!\p{L})/iu;
+const NEGATION_LIST = /(?<!\p{L})отсутству\p{L}*/iu;
+function hasDefect(t, re) {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`);
+  for (const m of t.matchAll(g)) {
+    const before = t.slice(0, m.index);
+    const sentence = before.slice(before.search(/[^.!?\n]*$/));
+    const clause = sentence.slice(sentence.search(/[^,;:]*$/));
+    if (!NEGATION_NEAR.test(clause) && !NEGATION_LIST.test(sentence)) return true;
+  }
+  return false;
+}
+
 function flagsFrom(title, description) {
   const t = `${title || ''}\n${description || ''}`;
   const flags = [];
-  for (const [label, re] of FLAG_PATTERNS) if (re.test(t)) flags.push(label);
+  for (const [label, re] of FLAG_PATTERNS) if (NEGATABLE.has(label) ? hasDefect(t, re) : re.test(t)) flags.push(label);
   // Два и более номинала в заголовке («5 копеек 1899 и 10 копеек 1913») — тоже набор; «7 рублей 50 копеек» — один
   if (!flags.includes('несколько монет')) {
     const tt = stripStartBid((title || '').toLowerCase().replace(/ё/g, 'е')).replace(/\d+\s*руб\p{L}*\s+\d{1,2}\s*коп\p{L}*/gu, 'X');
@@ -493,7 +517,7 @@ function parseCoin({ title, sectionPath, conditionText, description, specs = {} 
   // одна монета из драгметалла: содержание по тексту (унции, «чистого серебра N г», вес × проба)
   const content = !weight && (finalMetal === 'silver' || finalMetal === 'gold') && !flags.includes('несколько монет')
     ? contentFrom(title, description, specs) : null;
-  return {
+  const parsed = {
     denomKop,
     denomination: denominationLabel(denomKop) || foreignLabel(foreign) || worldLabel(world),
     year,
@@ -517,6 +541,10 @@ function parseCoin({ title, sectionPath, conditionText, description, specs = {} 
     noReserve: NO_RESERVE.test(title || ''),
     flags,
   };
+  // продавец пишет другой вес чистого металла, чем стандарт чеканки из таблиц (coins/metal.js): отметка для сверки
+  const mismatch = content ? require('./metal').contentMismatch(parsed) : null;
+  if (mismatch) parsed.contentMismatch = mismatch;
+  return parsed;
 }
 
 // Kufar: коллекция, альбом, россыпь, наследство — разбирать по фото (ориентира нет, бывают дорогие монеты за бесценок).

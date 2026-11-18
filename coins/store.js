@@ -259,6 +259,59 @@ async function winnersToRefresh(limit, maxAgeDays = 30) {
   return res.rows.map((r) => r.id);
 }
 
+// ---- История продаж через отзывы (listings.coin_history_queue, ayby_users.history_at — миграция 017) ----
+
+// Покупатели и продавцы наших проданных лотов, чьи отзывы ещё не читали (или читали давно): сначала самые активные
+async function historyUsers(limit, maxAgeDays = 30) {
+  const res = await pool.query(
+    `SELECT t.id FROM (
+       SELECT id, count(*) AS deals FROM (
+         SELECT winner_id AS id FROM listings.coin_lots WHERE winner_id IS NOT NULL
+         UNION ALL SELECT seller_id FROM listings.coin_lots WHERE seller_id IS NOT NULL AND outcome = 'sold') x
+       GROUP BY id) t
+     LEFT JOIN listings.ayby_users u ON u.user_id = t.id
+     WHERE u.history_at IS NULL OR u.history_at < NOW() - ($2 || ' days')::interval
+     ORDER BY t.deals DESC LIMIT $1`,
+    [limit, String(maxAgeDays)]
+  );
+  return res.rows.map((r) => r.id);
+}
+
+async function markHistoryRead(userId) {
+  await pool.query(
+    `INSERT INTO listings.ayby_users (user_id, checked_at, history_at) VALUES ($1, '-infinity'::timestamptz, NOW())
+     ON CONFLICT (user_id) DO UPDATE SET history_at = NOW()`,
+    [String(userId)]
+  );
+}
+
+// Сделки из отзывов → очередь на чтение страниц лотов; уже стоящие в очереди и разобранные не дублируются
+async function queueHistory(deals) {
+  let added = 0;
+  for (const d of deals) {
+    const res = await pool.query(
+      `INSERT INTO listings.coin_history_queue (external_id, url, title, deal_date) VALUES ($1, $2, $3, $4) ON CONFLICT (external_id) DO NOTHING`,
+      [String(d.id), d.url, (d.title || '').slice(0, 300), d.date || null]
+    );
+    added += res.rowCount;
+  }
+  return added;
+}
+
+async function historyPending() {
+  const res = await pool.query('SELECT count(*)::int AS n FROM listings.coin_history_queue WHERE done_at IS NULL');
+  return res.rows[0].n;
+}
+
+async function historyQueue(limit) {
+  const res = await pool.query('SELECT external_id, url, title, deal_date FROM listings.coin_history_queue WHERE done_at IS NULL ORDER BY added_at, external_id LIMIT $1', [limit]);
+  return res.rows;
+}
+
+async function historyDone(externalId, result) {
+  await pool.query('UPDATE listings.coin_history_queue SET done_at = NOW(), result = $2 WHERE external_id = $1', [String(externalId), result]);
+}
+
 async function getLot(listingId) {
   const res = await pool.query('SELECT * FROM listings.coin_lots WHERE listing_id = $1', [listingId]);
   return res.rows[0] || null;
@@ -580,6 +633,6 @@ module.exports = {
   lotByMessage, lotByExternalId, saveManualLot, reviveLot, endedLots, relistLot, lotRounds, setBid, cancelBid, getBid, updateBid, bidsDue, openBids, recentBids,
   upsertCard, saveLotDetails, recordOutcome, touchEndsAt, lotsToAssess, markNotified, markFavorited, markQuietChecked, lotsClosingSoon, lotsWithoutDetails, lotsToFinalize,
   lotsClosingWithin, savePhotoFiles, photoKeepIds, clearPhotoFiles, knownOwners, notifiedElsewhere, upsertUser, winnersToRefresh,
-  getLot, getCoinRows, upsertKufarLot, saveEstimate,
+  getLot, getCoinRows, upsertKufarLot, saveEstimate, historyUsers, markHistoryRead, queueHistory, historyPending, historyQueue, historyDone,
   getCatalog, getCatalogs, catalogKeys, upsertCoinType, upsertSales, rebuildCatalogFromSales, renormalizeSales, CATALOG_FACTOR,
 };
