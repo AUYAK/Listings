@@ -198,11 +198,45 @@ check('все разделы ay.by: карточки только серебро
   assert.strictEqual(notifyBlocker(parseCoin({ title: 'Коробка для монеты 20 рублей 2000', sectionPath: null }), 'buy_now'), 'не монета (сертификат, футляр)');
 });
 
-check('Kufar: серебро в описании и «не копия»', () => {
-  const { preciousLines, flagsFrom } = require('./coins/parse');
-  // «Монеты разных стран» (kufar 1085495367): одна медно-никелевая мелочь — ничего
-  assert.deepStrictEqual(preciousLines('Монеты разных стран. Цены в описании.\n\nШвеция:\n1 крона 1971г. 2р.\nГонконг:\n10 центов 1950г. 2,7р.\nТунис:\n100 миллимов 1960г. 1р.\nСмотрите другие мои объявления.'), []);
-  assert.deepStrictEqual(preciousLines('СССР:\n3 копейки 1961 1р.\n50 копеек 1924г. ПЛ 25р.\n15 копеек 1930 8р.\nЕсть серебро, пишите'), ['50 копеек 1924г. ПЛ 25р.', '15 копеек 1930 8р.']);
+check('Kufar: оценивается только конкретная монета из серебра или золота', () => {
+  const { coinListingBlocker } = require('./listings');
+  const why = (title, description = '') => coinListingBlocker(parseCoin({ title, sectionPath: null, description }), title);
+  // конкретные монеты — оцениваются
+  for (const title of ['Монета рубль серебро 1924 г.', 'Один полтинник 1924г', 'Монета 2 марки 1901 серебро Пруссия', '3 марки 1909', 'Серебряная монета НБРБ "Телец"']) assert.strictEqual(why(title), null, title);
+  // россыпь, подборки, лоты на вес, общие заголовки
+  for (const title of ['монеты СССР. серебро. цена за всё', '20 копеек разных годов ссср серебро', 'монеты РИ (серебро) 5 шт', 'Серебряные монеты НБРБ 2008 г.в.',
+    'Солнечная система. Комплект серебряных монет РБ', 'Серебро лом 500 гр', 'Коллекция серебряных монет', 'Рубли серебро одним лотом']) assert.strictEqual(why(title), 'россыпь / несколько монет', title);
+  assert.strictEqual(why('Монеты иностранные см.описание и фото', '50 копеек 1924г. 25р.'), 'не серебро и не золото');
+  assert.strictEqual(why('Монеты СССР'), 'не серебро и не золото');
+  assert.strictEqual(why('Копия 1 рубль 1924 серебро'), 'копия');
+  // медный пятак Екатерины II — не серебро; серебряные 5 копеек XIX века — серебро
+  assert.strictEqual(why('5 копеек 1778'), 'не серебро и не золото');
+  assert.strictEqual(why('монета 5 копеек 1880г Александра 2'), null);
+});
+check('перевыставленный «купить сейчас» без покупателя по той же цене — не выгодный лот', () => {
+  const { staleBuyNow } = require('./coins');
+  const noBuyer = { outcome: 'unsold', final_bids: 0, bids: 0, start_price: 18, last_price: 18 };
+  assert.strictEqual(staleBuyNow(18, [noBuyer]), true);
+  assert.strictEqual(staleBuyNow(20, [noBuyer]), true);
+  assert.strictEqual(staleBuyNow(15, [noBuyer]), false); // цену снизили — смотреть заново
+  assert.strictEqual(staleBuyNow(18, []), false);
+  assert.strictEqual(staleBuyNow(18, [{ outcome: 'unsold', final_bids: 4, last_price: 50, start_price: 1 }]), false); // были ставки — другой случай
+  assert.strictEqual(staleBuyNow(18, [{ outcome: 'sold', final_bids: 0, start_price: 18 }]), false);
+});
+check('подборки по годам: «сборный лот», «погодовка», список годов; годы события на памятной монете — нет', () => {
+  const { flagsFrom } = require('./coins/parse');
+  const multi = (title) => flagsFrom(title, '').includes('несколько монет');
+  for (const title of ['Сборный лот монет 10 копеек. 1924, 1925, 1927, 1928', 'Монеты СССР 10 копеек 1924-1957 погодовка', 'С рубля без мц! 10 копеек 1924, 27 и 30', '15 копеек 1925, 1927', '10 копеек 1895г и 1899г']) assert.strictEqual(multi(title), true, title);
+  for (const title of ['СССР 10 копеек 1924', '1 рубль 1965 20 лет Победы 1941-1945', '3 марки 1913 Саксония. Битва народов 1813-1913', 'Рубль 1913 300 лет дома Романовых, 1613-1913', '1 рубль 1924, СССР, серебро']) assert.strictEqual(multi(title), false, title);
+});
+check('Kufar: названа ли монета в заголовке (иначе — опознание по фото)', () => {
+  const { coinNamed } = require('./listings');
+  const named = (title) => coinNamed(parseCoin({ title, sectionPath: null }));
+  for (const title of ['Монета рубль серебро 1924 г.', '3 марки 1909', 'Канада 1 доллар 1987г серебро']) assert.strictEqual(named(title), true, title);
+  for (const title of ['Монета. Серебро.', 'Памятная монета НБРБ СЕРЕБРО', 'серебряная монета Швеции', 'Рубль серебро', 'МОНЕТА СЕРЕБРО 1910']) assert.strictEqual(named(title), false, title);
+});
+check('«не копия» в описании — не копия', () => {
+  const { flagsFrom } = require('./coins/parse');
   assert.strictEqual(flagsFrom('1 рубль 1924', 'Оригинал, не копия, не подделка').includes('копия'), false);
   assert.strictEqual(flagsFrom('1 рубль 1924', 'копия хорошего качества').includes('копия'), true);
   assert.strictEqual(flagsFrom('1 рубль 1924', 'не оригинал').includes('копия'), true);
@@ -1066,6 +1100,20 @@ check('«Завершен неудачно»: ставки были, миним�
   assert.strictEqual(decideOutcome({ bids: 3 }, lot), 'unsold');
   assert.strictEqual(decideOutcome({ bids: 3 }, { ...lot, statusText: '3 марки 1908 Завершён10 ноября', reserve: 'not_met' }), 'unsold');
 });
+check('некруглый довесок к максимуму: размер, круглые и некруглые числа, предохранитель', () => {
+  const { oddAmount } = require('./coins/bid');
+  assert.deepStrictEqual([3, 7, 9.5, 10, 13, 33, 49.5].map(oddAmount), [3.07, 7.07, 9.57, 10.57, 13.57, 33.57, 50.07]);
+  assert.deepStrictEqual([50, 85, 130, 190, 2876].map(oddAmount), [51.07, 86.07, 131.07, 191.07, 2877.07]);
+  // некруглое число от человека не трогаем; мусор не превращается в ставку
+  assert.deepStrictEqual([81.58, 13.03, 0, -5].map(oddAmount), [81.58, 13.03, 0, -5]);
+  assert.strictEqual(oddAmount('85'), 86.07);
+  // предохранитель: довесок никогда не больше 1,07 р. и 6% максимума, ставка не ниже максимума
+  for (let m = 0.5; m <= 5000; m += 0.5) {
+    const a = oddAmount(m);
+    assert.ok(a >= m && a - m <= 1.0701 && a - m <= m * 0.06 + 1e-6, `${m} → ${a}`);
+  }
+  assert.strictEqual(oddAmount(1), 1); // 0,07 от рубля — больше 6%
+});
 check('похожие продажи: уровень сходства, ближайшие по состоянию и цене, ориентир', () => {
   const cm = require('./coins/market');
   const sold = (id, title, price, cc, extra = {}) => {
@@ -1142,6 +1190,8 @@ check('металл лота для базы: чистый вес, проба, �
   assert.deepStrictEqual([lot.source, lot.purity, lot.grossG], ['lot', 0.999, 31.1]);
   assert.strictEqual(contentRecord({ ...parseCoin({ title: '50 эскудо 1968 Португалия серебро', sectionPath: null }), content: { fineGrams: 11.7, basis: 'по Numista: Portugal, 50 Escudos, 18 г × проба 650' } }).source, 'numista');
   assert.strictEqual(rec('50 эскудо 1968 Португалия серебро'), null);
+  const kr = rec('1 крюгерранд 2018 г. Южно-Африканская республика. Унция чистого серебра');
+  assert.deepStrictEqual([kr.fineG, kr.purity, kr.grossG, kr.source], [31.07, 0.999, 31.1, 'table']);
 });
 check('Kufar: германские марки без слова «Германия»', () => {
   const { fineContent } = require('./coins/metal');

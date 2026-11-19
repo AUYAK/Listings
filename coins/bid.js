@@ -27,6 +27,25 @@ function parseBidReply(text) {
   return max > 0 ? { max } : null;
 }
 
+// Некруглый довесок к максимуму. На ay.by побеждает больший максимум с любым перевесом, а цена — не выше своего
+// максимума: 13,03 р. обходит 13 р. (ay.by 5041986585, 18.11.2026). По 810 раскрытым максимумам 150 торгов: 85% —
+// целые рубли, 7% — «,50»; от 50 р. половина ставок кратна 5, ещё 15–22% — «круглое + 1» (81, 86, 151). Довесок
+// ставит нас выше и тех, и других: до 10 р. — 0,07; до 50 р. — 0,57 (выше «,50»); от 50 р. — 1,07 (выше «+1»).
+// Только к круглому максимуму (целые рубли или «,50»): 81,58 от человека — уже его выбор. SNIPE_ODD=0 — выключить.
+// Предохранитель: довесок не больше ODD_MAX_ADD рублей и ODD_MAX_SHARE от максимума, иначе ставится сам максимум.
+const ODD = process.env.SNIPE_ODD !== '0';
+const ODD_MAX_ADD = 1.07;
+const ODD_MAX_SHARE = 0.06;
+function oddAmount(max) {
+  const m = Math.round(Number(max) * 100) / 100;
+  if (!ODD || !(m > 0)) return m;
+  const kop = Math.round((m - Math.floor(m)) * 100);
+  if (kop !== 0 && kop !== 50) return m;
+  const add = m < 10 ? 0.07 : m < 50 ? 0.57 : 1.07;
+  const out = Math.round((m + add) * 100) / 100;
+  return out > m && out - m <= ODD_MAX_ADD + 1e-9 && out - m <= m * ODD_MAX_SHARE + 1e-9 ? out : m;
+}
+
 // Состояние лота для снайпа. Внутри evaluate — только циклы (Prototype.js на ay.by подменяет методы массивов).
 async function readLotState(page) {
   const raw = await page.evaluate(() => {
@@ -138,4 +157,4 @@ async function placeBid(page, amount, { confirm = true, beforeConfirm = null } =
   return { confirmed: true, value, consent, clickedAt, state, ok: !state.errorText && !/login\.phtml/.test(page.url()) };
 }
 
-module.exports = { parseBidReply, readLotState, openLot, placeBid, fmt, pause, SNIPE_SECONDS, BID_BUTTON, CONFIRM_BUTTON };
+module.exports = { parseBidReply, oddAmount, readLotState, openLot, placeBid, fmt, pause, SNIPE_SECONDS, BID_BUTTON, CONFIRM_BUTTON };

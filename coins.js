@@ -232,12 +232,24 @@ async function notifyLot(monitor, listingId, lot, parsed, closing = false, est =
 // (аукцион ещё далеко от конца) или закрыть (не подходит / не выгодно — больше не рассматриваем).
 // «Минимальная цена не пройдена» при выгодной ставке — карточка всё равно уходит, с предупреждением: снайп со своим
 // максимумом ничего не стоит (минимум выше — лот просто не продадут), а молчание прятало лоты вроде ay.by 5042028851.
+// Прошлый раунд лота закончился без покупателя, а цена с тех пор не снизилась
+function staleBuyNow(price, rounds) {
+  return (rounds || []).some((r) => r.outcome !== 'sold' && !(r.final_bids > 0 || r.bids > 0)
+    && (r.start_price ?? r.last_price) != null && price >= Number(r.start_price ?? r.last_price));
+}
+
 async function considerLot(monitor, listingId, lot, parsed, { closing = false } = {}) {
   const timing = notifyTiming(monitor, parsed, lot);
   if (timing === 'never') { await cstore.markNotified(listingId).catch(() => {}); return { action: 'skip' }; }
   if (timing === 'closing') return { action: 'wait' };
   const est = await assessLot(listingId, parsed, lot.price, lot.saleType, { title: lot.title, description: lot.description });
   const quiet = cmarket.quietLot(est, lot);
+  // «Купить сейчас», перевыставленный по той же или большей цене после раунда без покупателя: рынок эту цену уже
+  // отверг (перекупщики забирают выгодные блиц-лоты за часы) — «выгодно» по медиане здесь не сигнал, карточка не нужна
+  if (!quiet && est.isBargain && lot.saleType === 'buy_now' && staleBuyNow(lot.price, await cstore.lotRounds(listingId).catch(() => []))) {
+    await cstore.markNotified(listingId).catch(() => {});
+    return { action: 'rejected', est, stale: true };
+  }
   if (quiet || (timing === 'now' && est.isBargain)) {
     const sent = await notifyLot(monitor, listingId, lot, parsed, closing, est, quiet);
     return { action: quiet ? 'quiet' : 'bargain', sent, est, quiet };
@@ -259,7 +271,7 @@ function logDecision(monitor, id, lot, parsed, r) {
   const what = `[${id}] ${lot.title} — ${priceStr(lot.price)}`;
   if (r.action === 'bargain') console.log(`${head} BARGAIN: ${what} · ${parsed.slab ? `слаб ${parsed.slab.grade}` : parsed.grade || '?'} · ${r.est.deviationPct}% к ${r.est.referenceSource} → ${r.sent} чат(ов)`);
   else if (r.action === 'quiet') console.log(`${head} QUIET: ${what} · ${lot.bids} ставок · ориентир ${Math.round(r.quiet.ref)} (${r.quiet.refSource}), максимум ${r.quiet.max} → ${r.sent} чат(ов)`);
-  else if (r.action === 'rejected') console.log(`${head} stored: ${what} · ${parsed.grade || '?'} · ${r.est.deviationPct == null ? 'нет ориентира' : r.est.deviationPct + '%'}`);
+  else if (r.action === 'rejected') console.log(`${head} stored: ${what} · ${parsed.grade || '?'} · ${r.stale ? 'перевыставлен без покупателя по той же цене' : r.est.deviationPct == null ? 'нет ориентира' : r.est.deviationPct + '%'}`);
   else if (r.action === 'wait' && lot.endsAt) console.log(`${head} auction, notify ≤${AUCTION_NOTIFY_HOURS}h before end${r.est ? ' (не тихий)' : ''}: ${what} (${timeLeftStr(lot.endsAt)})`);
 }
 
@@ -976,4 +988,4 @@ async function main() {
 }
 
 if (require.main === module) main();
-module.exports = { buildCaption, roundsLine, cardWanted, decideOutcome, worthNotifying, worthPhotos, notifyTiming, matchesMonitor, assessLot, considerLot, endsAtNight, listUrl, feedCandidate, feedOwners, historyCandidate, AUCTION_NOTIFY_HOURS, PRECLOSE_MIN };
+module.exports = { buildCaption, roundsLine, staleBuyNow, cardWanted, decideOutcome, worthNotifying, worthPhotos, notifyTiming, matchesMonitor, assessLot, considerLot, endsAtNight, listUrl, feedCandidate, feedOwners, historyCandidate, AUCTION_NOTIFY_HOURS, PRECLOSE_MIN };

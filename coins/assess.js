@@ -17,8 +17,9 @@ async function coinRows() {
 
 // parsed — разбор coins/parse.js (состояние в parsed.grade); price — цена лота или null;
 // excludeId — id самого лота, чтобы он не попал в свою же медиану; fixedPrice — фиксированная цена, а не ставка;
+// bargainPct — свой порог выгоды в процентах (по умолчанию COINS_BARGAIN_PCT);
 // title/description — текст лота: по нему ищется вес драгметалла, если таблиц и веса в тексте нет (coins/content.js)
-async function assessCoin({ parsed, price = null, excludeId = null, fixedPrice = false, title = null, description = null }) {
+async function assessCoin({ parsed, price = null, excludeId = null, fixedPrice = false, title = null, description = null, bargainPct = undefined }) {
   if (title && needsLookup(parsed)) {
     const c = await resolveContent(parsed, title, description || '').catch((err) => { console.warn(`[Вес] ${err.message}`); return null; });
     if (c) parsed = { ...parsed, content: c };
@@ -32,7 +33,7 @@ async function assessCoin({ parsed, price = null, excludeId = null, fixedPrice =
     if (n) catalogs.push(n);
   }
   const metal = await metalValueLive(parsed).catch((err) => { console.warn(`[Metal] ${err.message}`); return null; });
-  return cmarket.assess({ parsed, price, rows, excludeId, catalogs, coinType: type, metal, fixedPrice });
+  return cmarket.assess({ parsed, price, rows, excludeId, catalogs, coinType: type, metal, fixedPrice, ...(bargainPct != null ? { bargainPct } : {}) });
 }
 
 module.exports = { assessCoin };

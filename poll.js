@@ -356,7 +356,7 @@ async function applyBidOrder(msg, chatId, lot, order, liveState) {
   }
   await cstore.setBid(lot.id, chatId, order.max);
   const bidsNow = live && live.bids != null ? live.bids : (lot.bids || 0);
-  await reply(msg, `🎯 Снайп: до <b>${bid.fmt(order.max)}</b> на «${escHtml(lot.title)}».\nСейчас ${price != null ? bid.fmt(price) : '?'}${min != null ? ` (мин. ставка ${bid.fmt(min)})` : ''} · ${bidsNow} ставок · до ${lot.ends_at ? fmtDate(lot.ends_at) : '?'}.\nБот поставит максимум за ${bid.SNIPE_SECONDS} с до конца и отчитается. Изменить или отменить: то же сообщение с другим числом или «отмена» (ответом на карточку или вместе со ссылкой).`);
+  await reply(msg, `🎯 Снайп: до <b>${bid.fmt(order.max)}</b> на «${escHtml(lot.title)}».\nСейчас ${price != null ? bid.fmt(price) : '?'}${min != null ? ` (мин. ставка ${bid.fmt(min)})` : ''} · ${bidsNow} ставок · до ${lot.ends_at ? fmtDate(lot.ends_at) : '?'}.\nБот поставит ${bid.oddAmount(order.max) !== order.max ? `<b>${bid.fmt(bid.oddAmount(order.max))}</b> (максимум с некруглым довеском)` : 'максимум'} за ${bid.SNIPE_SECONDS} с до конца и отчитается. Изменить или отменить: то же сообщение с другим числом или «отмена» (ответом на карточку или вместе со ссылкой).`);
 }
 
 // /bids: активные заявки со свежим состоянием каждой страницы лота (цена, мин. ставка, конец — и в базу), плюс итоги
@@ -390,7 +390,7 @@ async function sendBids(chatId) {
     const ends = live && live.endsAt ? live.endsAt : r.ends_at;
     const max = Number(r.max_byn);
     const ended = live && live.title && live.ended;
-    const outbid = !ended && live && live.min != null && live.min > max;
+    const outbid = !ended && live && live.min != null && live.min > bid.oddAmount(max); // ставится максимум с довеском
     // не поставлена, а торги идут и максимума хватает — перезапустить: снайпер возьмёт её снова под конец
     let restarted = false;
     if (r.status === 'failed' && live && live.title && !ended && !outbid) {

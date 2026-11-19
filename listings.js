@@ -3,44 +3,96 @@ const { chromium } = require('playwright');
 const store = require('./store');
 // Этот процесс ведёт только мониторы Kufar; площадки с другим source (ay.by → coins.js) живут отдельно
 const MONITORS = require('./config').MONITORS.filter((m) => !m.source || m.source === 'kufar');
-const { parseCoin, notifyBlocker, preciousLines } = require('./coins/parse');
+const { parseCoin, notifyBlocker } = require('./coins/parse');
 const cstore = require('./coins/store');
 const cmarket = require('./coins/market');
 const { assessCoin } = require('./coins/assess');
 const tg = require('./telegram');
 const photos = require('./coins/photos');
+const vision = require('./coins/vision');
 
-// Мониторы с domain='coins' (Kufar): каждое объявление разбирается и сохраняется в coin_lots. Уведомления:
-//  1) серебро и золото без копий/подборок (лот серебра на вес — можно, его оценивает металл), только при выгоде
-//     (ниже каталога или нашей оценки на BARGAIN_PCT). Состояния у Kufar нет: если его нет и в заголовке, ориентир
-//     считается по F — нижняя оценка, «50 копеек 1925 за 30 р.» всё равно выгодно, а за 100 р. — нет.
-//     Слабы по фиксированной цене не шлём: такие цены завышены, а подделки слабов обычны;
+// Мониторы с domain='coins' (Kufar): каждое объявление разбирается и сохраняется в coin_lots. Уведомления — только
+// по конкретной монете из серебра или золота и только при выгоде (ниже каталога или нашей оценки на BARGAIN_PCT).
+// Не шлём: коллекции, россыпь, лоты на вес и подборки («монеты иностранные, см. описание»), копии, слабы
+// по фиксированной цене (такие цены завышены, а подделки слабов обычны). Состояния у Kufar нет: если его нет
+// и в заголовке, ориентир считается по F — нижняя оценка, «50 копеек 1925 за 30 р.» всё равно выгодно, а за 100 р. — нет.
+// Так же оценивается объявление, у которого изменилась цена: карточка «Обновление» — только если оно проходит оценку
+// (раньше обновление уходило по любому объявлению монитора, в том числе по отсеянным россыпям).
+// На Kufar торгуются, поэтому порог выгоды ниже, чем на ay.by: KUFAR_BARGAIN_PCT (15%) против COINS_BARGAIN_PCT (30%).
+// Заголовок ни о чём («Монета. Серебро.», «Памятная монета НБРБ») — монета опознаётся по фото (coins/vision.js):
+// не больше KUFAR_PHOTO_ID_PER_DAY объявлений в сутки и только при цене от KUFAR_PHOTO_ID_MIN_BYN до ..._MAX_BYN.
 // Возвращает { notify, reason, lines }.
 const ASSUMED_GRADE = 'F';
-const LOTS_MAX_BYN = parseFloat(process.env.KUFAR_LOTS_MAX_BYN || '0'); // 0 — без ограничения
+const KUFAR_BARGAIN_PCT = parseInt(process.env.KUFAR_BARGAIN_PCT || '15', 10);
+const PHOTO_ID_PER_DAY = parseInt(process.env.KUFAR_PHOTO_ID_PER_DAY || '15', 10); // 0 — не опознавать по фото
+const PHOTO_ID_MIN_BYN = parseFloat(process.env.KUFAR_PHOTO_ID_MIN_BYN || '20');
+const PHOTO_ID_MAX_BYN = parseFloat(process.env.KUFAR_PHOTO_ID_MAX_BYN || '600');
+let photoIdDay = '', photoIdCalls = 0;
+
+// Монета названа: есть номинал и год. «Монета. Серебро.», «Рубль серебро», «серебряная монета Швеции» — нет
+const coinNamed = (parsed) => Boolean((parsed.denomKop != null || parsed.foreign || parsed.world) && parsed.year);
+
+// Опознание по фото объявления. { parsed, line } — одна монета из серебра или золота, названа уверенно;
+// { reason } — на фото не то (несколько монет, не драгметалл, копия); null — не опознавали (лимит, цена, нет фото, сбой)
+async function identifyByPhoto(listing, price) {
+  if (!PHOTO_ID_PER_DAY || !vision.enabled() || !(price >= PHOTO_ID_MIN_BYN && price <= PHOTO_ID_MAX_BYN)) return null;
+  const day = new Date().toISOString().slice(0, 10);
+  if (day !== photoIdDay) { photoIdDay = day; photoIdCalls = 0; }
+  if (photoIdCalls >= PHOTO_ID_PER_DAY) return null;
+  try {
+    const images = await photos.lotImages({ source: 'kufar', url: listing.url }, 4);
+    if (!images.length) return null;
+    photoIdCalls++;
+    const g = await vision.gradePhotos(images, listing.title);
+    const coins = (g.result && g.result.coins) || [];
+    console.log(`  [Фото] [${listing.id}] ${listing.title}: ${coins.map((x) => `${x.title} (${x.metal}, ${x.grade}, ${x.confidence})`).join('; ') || 'монет не видно'} · ≈ ${g.costUsd != null ? g.costUsd.toFixed(3) : '?'}`);
+    if (coins.length !== 1) return { reason: coins.length ? 'на фото несколько монет' : 'на фото монету не разобрать' };
+    const coin = coins[0];
+    if (coin.confidence === 'low') return { reason: 'по фото монета не опознана уверенно' };
+    if (coin.copy_risk === 'high') return { reason: 'по фото похоже на копию' };
+    const parsed = vision.parsedFromVision(coin);
+    if (!parsed.isPrecious) return { reason: 'по фото не серебро и не золото' };
+    if (!coinNamed(parsed)) return { reason: 'по фото номинал и год не определены' };
+    return { parsed, line: `📷 По фото: ${coin.title}${coin.grade && coin.grade !== 'unknown' ? `, состояние ${coin.grade}` : ''} — заголовок монету не называет, проверьте` };
+  } catch (err) {
+    console.warn(`  [Фото] [${listing.id}] ${err.message}`);
+    return null;
+  }
+}
+// Заголовок Kufar о нескольких монетах: «Монеты СССР. Серебро. Цена за всё», «20 копеек разных годов», «Комплект …», «ЛОТ»
+const KUFAR_MULTI = /(?<!\p{L})монеты(?!\p{L})|разны[хе]\s+год|комплект|цена\s+за\s+вс[её]|(?<!\p{L})лот(?:ом|ы)?(?!\p{L})|коллекци/iu;
+
+// Почему объявление Kufar не оценивается вовсе (null — оценивается): не драгметалл; не одна конкретная монета
+// (лот на вес, несколько монет, «монеты» в заголовке); общие препятствия parse.notifyBlocker (копия, слаб)
+function coinListingBlocker(parsed, title) {
+  if (!parsed.isPrecious) return 'не серебро и не золото';
+  if (parsed.weight || parsed.flags.includes('несколько монет') || KUFAR_MULTI.test(title || '')) return 'россыпь / несколько монет';
+  return notifyBlocker(parsed, 'fixed');
+}
 async function assessCoinListing(listingId, listing) {
   // описание со страницы объявления (withItem): флаги «копия / дырка / чистка», проба и вес, слаб
   const text = [listing.params, listing.description].filter(Boolean).join('\n');
-  const parsed = parseCoin({ title: listing.title, sectionPath: null, description: text });
+  let parsed = parseCoin({ title: listing.title, sectionPath: null, description: text });
   const price = extractPriceFromStr(listing.price, 'р.');
-  const priceOk = !(LOTS_MAX_BYN > 0 && price > LOTS_MAX_BYN);
   await cstore.upsertKufarLot(listingId, parsed, price).catch((err) => console.warn(`  [Coins] save failed: ${err.message}`));
-  if (!parsed.isPrecious) {
-    // заголовок ни о чём («Монеты разных стран»), а в описании — серебро или золото с номиналом/годом
-    const found = preciousLines(listing.description);
-    if (found.length && priceOk) {
-      return { notify: true, lines: ['📜 В описании серебро / золото — ориентира у бота нет, смотрите цены и фото:', ...found.map((l) => `• ${l}`)] };
-    }
-    return { notify: false, reason: 'не серебро и не золото' };
-  }
-  const blocker = notifyBlocker(parsed, 'fixed');
+  const blocker = coinListingBlocker(parsed, listing.title);
   if (blocker) return { notify: false, reason: blocker };
+  let photoLine = null;
+  if (!coinNamed(parsed)) {
+    const id = await identifyByPhoto(listing, price);
+    if (id && id.reason) return { notify: false, reason: id.reason };
+    if (id) {
+      parsed = id.parsed;
+      photoLine = id.line;
+      await cstore.upsertKufarLot(listingId, parsed, price).catch(() => {});
+    }
+  }
   const forAssess = parsed.grade || parsed.slab ? parsed : { ...parsed, grade: ASSUMED_GRADE };
-  const est = await assessCoin({ parsed: forAssess, price, excludeId: listingId, fixedPrice: true, title: listing.title, description: text });
+  const est = await assessCoin({ parsed: forAssess, price, excludeId: listingId, fixedPrice: true, title: listing.title, description: text, bargainPct: KUFAR_BARGAIN_PCT });
   await cstore.saveEstimate(listingId, est).catch(() => {});
   const coinLine = [parsed.denomination, parsed.year, parsed.mintmaster || parsed.mint, parsed.ruler, parsed.isGold ? 'золото' : 'серебро'].filter(Boolean).join(' · ');
   const gradeLine = parsed.grade ? `🏷 Состояние (из заголовка): ${parsed.grade}` : parsed.slab ? null : `🏷 Состояние не указано — ориентир по ${ASSUMED_GRADE} (нижняя оценка), смотрите фото`;
-  const lines = [`🔎 ${coinLine}`, gradeLine, ...cmarket.formatEstimateLines(est)].filter(Boolean);
+  const lines = [photoLine, `🔎 ${coinLine}`, gradeLine, ...cmarket.formatEstimateLines(est)].filter(Boolean);
   if (!est.isBargain) return { notify: false, reason: est.deviationPct == null ? 'нет ориентира' : `${est.deviationPct}% к ${est.referenceSource}`, lines };
   return { notify: true, lines };
 }
@@ -248,6 +300,15 @@ async function checkMonitor(monitor, isFirstRun) {
         console.log(`  [${monitor.name}] NEW: [${listing.id}] ${listing.title} — ${listing.price?.replace(/\n/g, ' / ')}`);
       } else if (snapshotWritten && !isFirstSnapshot) {
         if (priceChanged(prev, listing)) {
+          if (monitor.domain === 'coins') {
+            await withItem(listing);
+            const verdict = await assessCoinListing(listingId, listing);
+            if (!verdict.notify) {
+              console.log(`  [${monitor.name}] price changed, stored (${verdict.reason}): [${listing.id}] ${listing.title}`);
+              continue;
+            }
+            listing.extraLines = verdict.lines;
+          }
           await notify(listing, monitor, true, prev, listingId);
           console.log(`  [${monitor.name}] UPDATED: [${listing.id}] ${listing.title}`);
         }
@@ -428,4 +489,5 @@ async function main() {
   setInterval(() => tick(false), INTERVAL_MS);
 }
 
-main();
+if (require.main === module) main();
+module.exports = { coinListingBlocker, coinNamed };

@@ -410,6 +410,8 @@ function metalFrom(title, sectionPath, denomKop, year, specMetal = null, foreign
   // СССР: червонец 1923 и «Сеятель» 1975–1976, 1981–1982 — золото
   if (denomKop === 1000 && (year === 1923 || (year >= 1975 && year <= 1982))) return 'gold';
   if (year >= 1931 && year <= 1991 && denomKop != null && denomKop <= 100) return 'base';
+  // 5 копеек 1758–1796 — медный пятак Елизаветы и Екатерины II, серебряных 5 копеек в эти годы не чеканили
+  if (denomKop === 5 && year >= 1758 && year <= 1796) return 'copper';
   // Империя: рубли/полтины/25/20/15/10/5 коп с 1867 — серебро (5 коп серебряные до 1915 в билоне)
   if (year >= 1700 && year <= 1917 && [100, 50, 25, 20, 15, 10, 5].includes(denomKop) && !/медь|медн/.test(t)) return 'silver';
   // Империя: 3, 5, 7½, 10, 15, 25, 37½ рублей — только золото (серебряных монет таких номиналов не было)
@@ -465,7 +467,9 @@ const FLAG_PATTERNS = [
   // флаг «слаб» ставит parseCoin по slabFrom: простое «слаб» ловило «слабый чекан»
   // «лот из 3», «одним лотом 3 монеты», «3 монеты», «20 15 10 копеек», «1 и 2 копейки»
   // «из набора ГБ СССР» — одна монета из банковского набора, не подборка
-  ['несколько монет', /лот из \d|подборк|(?<!из\s+(?:\p{L}+\s+)?)набор|\d+\s*шт\b|\d+\s*штук|одним лотом|(?<![\d\/])(?:[2-9]|[1-9]\d{1,2})\s*монет|(?<![\d\/])(?:\d{1,2}[\s,;]+(?:и\s+)?)+\d{1,2}\s*коп/iu],
+  // «Сборный лот монет 10 копеек. 1924, 1925, 1927», «10 копеек 1924-1957 погодовка», «10 копеек 1924, 27 и 30» —
+  // несколько монет: их цена попадала в медиану одной монеты (ay.by 5041197350: «10 копеек 1924» за 18 р. «выгодно»)
+  ['несколько монет', /сборн\p{L}*\s+лот|погодовк|лот\s+монет|(?:1[6-9]\d\d|20\d\d)\s*(?:г\.?\s*)?(?:[,;&]|\sи\s)\s*(?:1[6-9]\d\d|20\d\d)(?!\d)|(?:1[6-9]\d\d|20\d\d)\s*,\s*\d{2}\s*(?:,|\sи\s)\s*\d{2}(?!\d)|лот из \d|подборк|(?<!из\s+(?:\p{L}+\s+)?)набор|\d+\s*шт(?!\p{L})|\d+\s*штук|одним лотом|(?<![\d\/])(?:[2-9]|[1-9]\d{1,2})\s*монет|(?<![\d\/])(?:\d{1,2}[\s,;]+(?:и\s+)?)+\d{1,2}\s*коп/iu],
   ['редкая', /редк|\bR\b|\bR[1-9]\b|биткин\s*r/iu],
 ];
 const COPY_SECTION = /копи[ия]|новодел|реплик|сувенир/iu;
@@ -587,22 +591,6 @@ function ussrVariety(parsed) {
   return (USSR_VARIETIES[parsed.denomKop] || {})[parsed.year] || null;
 }
 
-// Kufar: серебро и золото в описании объявления, у которого заголовок ничего не говорит («Монеты разных стран»):
-// строки описания, где есть номинал или год и металл драгоценный («50 копеек 1924г. 15р.»). До max строк.
-function preciousLines(text, max = 5) {
-  const out = [];
-  for (const raw of String(text || '').split(/\n|;/)) {
-    const line = raw.replace(/\s+/g, ' ').trim();
-    if (!line || line.length > 150) continue;
-    const p = parseCoin({ title: line, sectionPath: null });
-    if (!p.isPrecious || p.flags.includes('копия')) continue;
-    if (p.denomKop == null && !p.foreign && !p.world && !p.year && !p.weight) continue;
-    out.push(line);
-    if (out.length >= max) break;
-  }
-  return out;
-}
-
 // Почему лот нельзя присылать при любой цене (общее правило для ay.by, Kufar, отчёта и фото): копия; подборка,
 // если это не лот серебра на вес; слаб не на аукционе (фиксированные цены на слабы завышены, подделки обычны).
 // null — препятствий нет. saleType: 'auction' | 'auction_buynow' | 'buy_now' | 'fixed' (Kufar).
@@ -647,6 +635,6 @@ function groupKeys(p) {
 
 module.exports = {
   parseCoin, groupKeys, notifyBlocker, denominationFrom, denominationLabel, yearFrom, mintFrom, metalFrom,
-  gradeFromAyby, gradeFromTitle, flagsFrom, rulerFor, slabFrom, gradeTokenFrom, weightFrom, contentFrom, worldFrom, purityFrom, preciousLines, ussrVariety,
+  gradeFromAyby, gradeFromTitle, flagsFrom, rulerFor, slabFrom, gradeTokenFrom, weightFrom, contentFrom, worldFrom, purityFrom, ussrVariety,
   GRADE_ORDER, AYBY_GRADES, SLAB_RAW_EQUIV, COPY_SECTION,
 };

@@ -87,6 +87,9 @@ async function fail(row, note) {
 
 async function snipe(row) {
   const max = Number(row.max_byn);
+  // сама ставка — максимум с некруглым довеском (bid.oddAmount): 85 → 86,07; обходит равные и «круглые + 1» ставки
+  const amount = bid.oddAmount(max);
+  const amountNote = amount !== max ? ` (ваш максимум ${bid.fmt(max)} + довесок)` : '';
   log(`[${row.external_id}] в работе: максимум ${bid.fmt(max)}, конец ${row.ends_at ? new Date(row.ends_at).toLocaleString('ru-BY') : '?'}`);
   await cstore.updateBid(row.listing_id, { status: 'running' });
   let page;
@@ -96,7 +99,7 @@ async function snipe(row) {
     let st = await bid.openLot(page, row.url);
     if (!st.hasLot) throw new Error(`страница лота недоступна (HTTP ${st.httpStatus})`);
     if (st.ended) { await report(row, st); return; }
-    if (st.minBid != null && st.minBid > max) { await fail(row, `минимальная ставка уже ${bid.fmt(st.minBid)}, ваш максимум ${bid.fmt(max)}`); return; }
+    if (st.minBid != null && st.minBid > amount) { await fail(row, `минимальная ставка уже ${bid.fmt(st.minBid)}, ваш максимум ${bid.fmt(max)}`); return; }
     let deadline = Date.now() + st.remaining * 1000;
     await cstore.touchEndsAt(row.listing_id, new Date(deadline), st.price, st.bids).catch(() => {});
     log(`[${row.external_id}] до конца ${st.remaining} с, цена ${bid.fmt(st.price)}, мин. ставка ${st.minBid != null ? bid.fmt(st.minBid) : '?'}`);
@@ -113,7 +116,7 @@ async function snipe(row) {
     st = await bid.openLot(page, row.url);
     if (st.ended) { await report(row, st); return; }
     deadline = Date.now() + st.remaining * 1000;
-    if (st.minBid != null && st.minBid > max) { await fail(row, `минимальная ставка уже ${bid.fmt(st.minBid)}, ваш максимум ${bid.fmt(max)}`); return; }
+    if (st.minBid != null && st.minBid > amount) { await fail(row, `минимальная ставка уже ${bid.fmt(st.minBid)}, ваш максимум ${bid.fmt(max)}`); return; }
     if (!st.hasBidButton) { await fail(row, 'на странице нет кнопки «Сделать ставку»'); return; }
 
     // Ошибка до подтверждения (не появилось окно «Да, сделать ставку», не нашлась кнопка или поле) — ставка не ушла:
@@ -121,7 +124,7 @@ async function snipe(row) {
     let r;
     for (let attempt = 1; ; attempt++) {
       try {
-        r = await bid.placeBid(page, max, { beforeConfirm: () => sleepUntil(deadline - SNIPE * 1000, 200) });
+        r = await bid.placeBid(page, amount, { beforeConfirm: () => sleepUntil(deadline - SNIPE * 1000, 200) });
         break;
       } catch (err) {
         const beforeConfirm = /не появилось подтверждение|не найден/.test(err.message);
@@ -130,7 +133,7 @@ async function snipe(row) {
         st = await bid.openLot(page, row.url);
         if (st.ended) { await report(row, st); return; }
         deadline = Date.now() + st.remaining * 1000;
-        if (st.minBid != null && st.minBid > max) { await fail(row, `минимальная ставка уже ${bid.fmt(st.minBid)}, ваш максимум ${bid.fmt(max)}`); return; }
+        if (st.minBid != null && st.minBid > amount) { await fail(row, `минимальная ставка уже ${bid.fmt(st.minBid)}, ваш максимум ${bid.fmt(max)}`); return; }
       }
     }
     const left = Math.round((deadline - r.clickedAt.getTime()) / 1000);
@@ -149,9 +152,9 @@ async function snipe(row) {
         return;
       }
     }
-    const note = `ставка ${bid.fmt(max)} за ${left} с до конца; цена после ставки ${bid.fmt(r.state.price)}${r.state.yours ? ', лидируем' : ''}`;
+    const note = `ставка ${bid.fmt(amount)} за ${left} с до конца; цена после ставки ${bid.fmt(r.state.price)}${r.state.yours ? ', лидируем' : ''}`;
     await cstore.updateBid(row.listing_id, { status: 'placed', note, placedPrice: r.state.price, placedAt: r.clickedAt });
-    await say(row.chat_id, `✅ ${lotLink(row)}: ставка до <b>${bid.fmt(max)}</b> поставлена за ${left} с до конца. Цена сейчас ${bid.fmt(r.state.price)}${r.state.yours ? ', вы лидируете' : ''}.`);
+    await say(row.chat_id, `✅ ${lotLink(row)}: ставка до <b>${bid.fmt(amount)}</b>${amountNote} поставлена за ${left} с до конца. Цена сейчас ${bid.fmt(r.state.price)}${r.state.yours ? ', вы лидируете' : ''}.`);
     log(`[${row.external_id}] placed: ${note}`);
 
     await sleepUntil(deadline + 20000, 5000);
